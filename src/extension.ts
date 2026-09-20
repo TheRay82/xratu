@@ -19,12 +19,13 @@ import { LocalSessionStore, resolveSessionTitle } from './local/localSessionStor
 import { discoverLocalRuntimes, probeCustomEndpoint, probeLocalEndpoint, modelIsLikelyVision, modelLikelySupportsTools } from './local/localModelClient';
 import type { DiscoveredLocalModel } from './local/localModelClient';
 import { ui, setUiLocale } from './uiStrings';
-import { BACKEND_SYSTEM_PROMPT } from './systemPrompt';
+import { LOCAL_SYSTEM_PROMPT } from './systemPrompt';
 import { gitWorkspaceFiles, setPlanModeExitListener, setTaskListWriteListener } from './xratu_mcp_tools';
 import { TASK_LIST_TOOL_NAME, parseTaskListArgs, type TaskListItem } from './taskList';
 import { MCP_REGISTRY } from './mcpRegistry';
 import { getProxyDispatcher } from './proxyDispatcher';
-import { providerIdForUrl, providerLabelForUrl } from './providerIdentity';
+import { providerIdForUrl, providerLabelForUrl, isIranianProvider } from './providerIdentity';
+import { priceForModel, costForUsage, type PriceOverride } from './pricing';
 import { resolveApiStyle, isOpenCodeHost, isNonChatModel } from './local/apiStyle';
 import { discoverSkills, ensureBundledSkill, listableSkills, resolveSkillForRun, skillId, SKILL_FILE, type DiscoveredSkill } from './skills';
 
@@ -655,6 +656,10 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
     /** Stable OpenCode session id for a not-yet-persisted conversation, so
      *  every round of a run sends the same `x-opencode-session`. */
     private _ephemeralSessionId: string | null = null;
+    /** Cost display for the CURRENT run: USD normally, Toman for Iranian
+     *  providers when the user configured a rate. */
+    private _runCostCurrency: 'USD' | 'IRT' = 'USD';
+    private _runTomanPerUsd = 0;
     private _history: HistoryMessage[] = [];
     private _sessionSummary: string | null = null;
     /** Display title of the CURRENT session (toolbar button + picker).
@@ -742,6 +747,9 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
      *  place. Null between blocks. */
     private _localThinkingBlockEvent: { type: 'thinking'; content: string } | null = null;
     private _localCurrentUsage: LocalUsage | null = null;
+    /** Sum of every non-estimated round's usage across the CURRENT turn (a
+     *  tool-calling turn makes several requests) - the basis for turn cost. */
+    private _localTurnUsage: LocalUsage | null = null;
     /** The in-flight local turn, held so a throttled snapshot can persist it
      *  BEFORE the run commits - a host crash mid-run used to lose the whole
      *  turn (local mode has no server copy). Cleared in _runLocalAgent's
@@ -1301,6 +1309,33 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
         return providerLabelForUrl(baseUrl);
     }
 
+    /** Sum two usage records (each field added when present). */
+    private _addUsage(prev: LocalUsage | null, next: LocalUsage): LocalUsage {
+        if (!prev) return { ...next };
+        return {
+            promptTokens: (prev.promptTokens ?? 0) + (next.promptTokens ?? 0),
+            completionTokens: (prev.completionTokens ?? 0) + (next.completionTokens ?? 0),
+            totalTokens: (prev.totalTokens ?? 0) + (next.totalTokens ?? 0),
+            cachedTokens: (prev.cachedTokens ?? 0) + (next.cachedTokens ?? 0),
+        };
+    }
+
+    /** Estimated cost of one usage record, or null when the model's price is
+     *  unknown (the UI then shows nothing rather than a wrong number). */
+    private _localCostFor(usage: LocalUsage | null): { amount: number; currency: 'USD' | 'IRT' } | null {
+        if (!usage) return null;
+        const overrides = vscode.workspace.getConfiguration('xratu')
+            .get<Record<string, PriceOverride>>('modelPricing') ?? null;
+        const price = priceForModel(this._selectedModel ?? '', overrides);
+        if (!price) return null;
+        const usd = costForUsage(price, usage, 'USD');
+        if (!usd) return null;
+        if (this._runCostCurrency === 'IRT' && this._runTomanPerUsd > 0) {
+            return { amount: usd.amount * this._runTomanPerUsd, currency: 'IRT' };
+        }
+        return usd;
+    }
+
     private _maskApiKey(apiKey: string): string {
         if (apiKey.length <= 8) return '••••••••';
         return `${apiKey.slice(0, 3)}••••${apiKey.slice(-4)}`;
@@ -1649,12 +1684,12 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     /** Build the system prompt for local mode. The persona base is the
-     *  canonical prompt bundled in systemPrompt.ts - local runs never touch
-     *  a backend, so the prompt travels with the extension. Only the
+     *  canonical prompt bundled in systemPrompt.ts - the runtime is fully
+     *  local, so the prompt travels with the extension. Only the
      *  local-operational notes and static context are appended here. */
     private _buildLocalSystemPrompt(fileContent: string, rulesContext: string, sessionSummary: string | null, planMode: boolean): string {
         const parts: string[] = [
-            BACKEND_SYSTEM_PROMPT,
+            LOCAL_SYSTEM_PROMPT,
             "",
             "Operational notes for local mode:",
             "- Attached images are part of the current request only.",
@@ -1662,8 +1697,7 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
             "- web_search and fetch_url access the web directly from this machine; if web_search reports no provider configured, rely on fetch_url or answer from your own knowledge.",
         ];
         if (planMode) {
-            // Mirrors the backend's per-turn plan hint (chat.py plan_hint):
-            // local plan mode has no server, so the guidance rides here.
+            // Per-turn plan guidance for the local runtime.
             parts.push(
                 "",
                 "PLAN MODE (READ-ONLY): mutating tools are unavailable. Draft the implementation plan " +
@@ -1926,6 +1960,7 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
         this._localAccumulatedThinking = '';
         this._localThinkingBlockEvent = null;
         this._localCurrentUsage = null;
+        this._localTurnUsage = null;
         // `events` is held by reference and grows as the run streams - the
         // throttled snapshot below always captures the current tail.
         this._localPendingTurn = {
@@ -1977,6 +2012,14 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
         // already-started plan turn.
         const runPlanMode = planMode ?? this._planMode;
         const systemPrompt = this._buildLocalSystemPrompt(fileContent, rulesContext, this._sessionSummary, runPlanMode);
+
+        // Cost display for this run: Toman only for Iranian providers AND only
+        // when the user set a rate (never guess an exchange rate).
+        const tomanRate = Number(vscode.workspace.getConfiguration('xratu').get('tomanPerUsd')) || 0;
+        this._runTomanPerUsd = tomanRate > 0 ? tomanRate : 0;
+        this._runCostCurrency = isIranianProvider(this._providerIdForUrl(active.baseUrl)) && this._runTomanPerUsd > 0
+            ? 'IRT'
+            : 'USD';
 
         try {
             const agent = runLocalAgent(
@@ -2173,8 +2216,13 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
             case 'usage':
                 // Mid-stream ESTIMATES only feed the webview's live context
                 // meter; the turn's recorded usage stays on the real
-                // round-end event (server-reported), which overwrites it.
-                if (!event.estimated) this._localCurrentUsage = event.usage;
+                // round-end event (server-reported).
+                if (!event.estimated) {
+                    this._localCurrentUsage = event.usage;
+                    // A turn can span several model rounds (tool calls); the
+                    // turn's COST is the sum across rounds, not just the last.
+                    this._localTurnUsage = this._addUsage(this._localTurnUsage, event.usage);
+                }
                 // Mirror cloud behavior: the webview's context meter tracks
                 // each round's cumulative usage while the turn streams.
                 this._view?.webview.postMessage({
@@ -2183,6 +2231,7 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
                         input_tokens: event.usage.promptTokens,
                         output_tokens: event.usage.completionTokens,
                         cached_tokens: event.usage.cachedTokens ?? null,
+                        cost: this._localCostFor(this._localTurnUsage),
                     } : null,
                 });
                 break;
@@ -2204,6 +2253,7 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
                             input_tokens: this._localCurrentUsage.promptTokens,
                             output_tokens: this._localCurrentUsage.completionTokens,
                             cached_tokens: this._localCurrentUsage.cachedTokens ?? null,
+                            cost: this._localCostFor(this._localTurnUsage),
                         } : null,
                         context_window: this._contextWindowHint() ?? null,
                     };
