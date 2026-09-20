@@ -64,6 +64,9 @@ jobs:
       - name: Base URL normalization tests
         run: npm run test:base-url
 
+      - name: Provider identity tests
+        run: npm run test:provider-identity
+
       - name: Compaction tests
         run: npm run test:compaction
 
