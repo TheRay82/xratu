@@ -1056,11 +1056,6 @@ export function InputBar({
                             </span>
                             <ChevronUp size={12} />
                         </button>
-                        {formatCost(sessionCost) && (
-                            <span className="session-cost" dir="auto" title={t('sessionCostTitle')}>
-                                {formatCost(sessionCost)}
-                            </span>
-                        )}
                         {ctxOpen && (
                             <div className="ctx-menu" role="menu" aria-label={t('ctxAria')}>
                                 <button
@@ -1099,6 +1094,11 @@ export function InputBar({
                             </div>
                         )}
                     </span>
+                    {formatCost(sessionCost) && (
+                        <span className="session-cost" dir="auto" title={t('sessionCostTitle')}>
+                            {formatCost(sessionCost)}
+                        </span>
+                    )}
                     </div>
                     <div className="composer-buttons">
                         <button
