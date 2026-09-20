@@ -64,6 +64,9 @@ jobs:
       - name: Base URL normalization tests
         run: npm run test:base-url
 
+      - name: Proxy resolution tests
+        run: npm run test:proxy
+
       - name: Provider identity tests
         run: npm run test:provider-identity
 
