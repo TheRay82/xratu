@@ -40,6 +40,39 @@ export interface LocalSessionMeta {
     renamed?: boolean;
 }
 
+/** Cap on the transcript text scanned per session during a search. */
+const SEARCH_SCAN_CHARS = 200_000;
+
+/** Event fields that carry visible transcript text. Deliberately EXCLUDES
+ *  metadata (`role`, `type`, `id`, `tool`, …) - otherwise searching for
+ *  "assistant" would match every session that has an assistant turn. */
+const SEARCH_TEXT_FIELDS = ['text', 'output', 'content', 'value'];
+
+/**
+ * True when the session's visible transcript contains `needle` (lowercased).
+ * Only the known text fields are examined, and each string is sliced to the
+ * remaining scan budget BEFORE lowercasing, so a single huge field cannot
+ * blow past the per-session cap.
+ */
+function transcriptMatches(uiHistory: unknown, needle: string): boolean {
+    if (!Array.isArray(uiHistory) || !uiHistory.length) return false;
+    let scanned = 0;
+    for (const event of uiHistory) {
+        if (!event || typeof event !== 'object') continue;
+        const record = event as Record<string, unknown>;
+        for (const field of SEARCH_TEXT_FIELDS) {
+            const value = record[field];
+            if (typeof value !== 'string' || !value) continue;
+            const remaining = SEARCH_SCAN_CHARS - scanned;
+            if (remaining <= 0) return false;
+            const chunk = value.length > remaining ? value.slice(0, remaining) : value;
+            scanned += chunk.length;
+            if (chunk.toLowerCase().includes(needle)) return true;
+        }
+    }
+    return false;
+}
+
 const MAX_STORED_CONTENT = 20_000;
 const MAX_STORED_HISTORY = 120;
 const TITLE_MAX_LEN = 48;
@@ -317,6 +350,28 @@ export class LocalSessionStore {
         index.sort((a, b) => b.updatedAt - a.updatedAt);
         if (workspaceRoot == null) return index;
         return index.filter((m) => m.workspace === workspaceRoot);
+    }
+
+    /**
+     * Full-text search across stored sessions: title, workspace, and the
+     * visible transcript. Scans at most `limit` most-recent sessions and caps
+     * the text examined per session so a large history stays responsive.
+     */
+    async search(query: string, workspaceRoot?: string, limit = 200): Promise<LocalSessionMeta[]> {
+        const needle = query.trim().toLowerCase();
+        if (!needle) return [];
+        const candidates = (await this.list(workspaceRoot)).slice(0, limit);
+        const hits: LocalSessionMeta[] = [];
+        for (const meta of candidates) {
+            if (meta.title.toLowerCase().includes(needle)
+                || meta.workspace.toLowerCase().includes(needle)) {
+                hits.push(meta);
+                continue;
+            }
+            const snapshot = await this.load(meta.id);
+            if (snapshot && transcriptMatches(snapshot.uiHistory, needle)) hits.push(meta);
+        }
+        return hits;
     }
 
     /** Session to reopen for a workspace: the preferred id when it still

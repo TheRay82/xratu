@@ -218,6 +218,29 @@ try {
         check('retries every attempt before throwing', attempts, 6);
         rmSync(dir, { recursive: true, force: true });
     }
+
+    // 13. Full-text search across titles and transcripts. `meta7` matches by
+    //     title; `meta` (renamed to "my custom name") only via its transcript.
+    check('search empty query -> []', (await store.search('')).length, 0);
+    const loginHits = (await store.search('login bug')).map((m) => m.id);
+    check('search matches title', loginHits.includes(meta7.id), true);
+    check('search matches transcript, not just title',
+        (await store.search('third turn text')).map((m) => m.id).includes(meta.id), true);
+    check('search is case-insensitive', (await store.search('LOGIN BUG')).length, loginHits.length);
+    check('search no match -> []', (await store.search('no-such-token-xyz')).length, 0);
+    check('search scoped to another workspace -> []', (await store.search('login bug', '/somewhere-else')).length, 0);
+    check('search within workspace', (await store.search('login bug', ws)).length, loginHits.length);
+    // Metadata fields (role/type/id) must NOT be searchable, or a query like
+    // "assistant" would match every session that has an assistant turn.
+    const meta8 = await store.create(ws);
+    await store.save(meta8.id, {
+        workspace: ws, model: null, summary: null, localHistory: [],
+        uiHistory: [{ role: 'assistant', type: 'chunk', id: 'evt-1', text: 'hello world' }],
+    });
+    check('search ignores metadata fields',
+        (await store.search('assistant')).some((m) => m.id === meta8.id), false);
+    check('search still finds visible text',
+        (await store.search('hello world')).some((m) => m.id === meta8.id), true);
 } finally {
     rmSync(root, { recursive: true, force: true });
 }
