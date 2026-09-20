@@ -318,11 +318,11 @@ button {
 }
 
 .session-row-ws {
-    /* Takes the remaining space and truncates only when it must - a hard 40%
-       cap clipped ordinary paths far too early. The element is dir-locked to
-       LTR (the `dir` attribute) so the ellipsis lands at the END of the path
-       rather than the start. */
-    flex: 1 1 auto;
+    /* Shrinks when it must but does NOT grow: growing pushed the date to the
+       trailing edge, right next to the edit/delete buttons. The element is
+       dir-locked to LTR (the `dir` attribute) so the ellipsis lands at the END
+       of the path rather than the start. */
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -338,7 +338,8 @@ button {
 }
 
 /* Calendar date on a session row (Jalali in fa). Kept compact and muted so it
-   reads as metadata, and sits immediately after the title. */
+   reads as metadata. It trails the session name (and the workspace path when
+   "All workspaces" is active), i.e. it is the LAST element of the row. */
 .session-row-date {
     flex: 0 0 auto;
     font-size: 10px;
