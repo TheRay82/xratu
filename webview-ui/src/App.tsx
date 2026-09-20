@@ -10,6 +10,7 @@ import type {
     McpSaveTarget,
     McpServerPayload,
     McpServerView,
+    ModelCapability,
     NotificationItem,
     SessionMeta,
     SkillView,
@@ -85,6 +86,7 @@ export function App() {
         defaultModel: string;
         models: string[];
         contextWindows: Record<string, number>;
+        capabilities: Record<string, ModelCapability>;
     } | null>(null);
     const [selectedModel, setSelectedModel] = useState<string | null>(null);
     // User's explicit per-model context-window overrides (mirrored from the
@@ -386,6 +388,7 @@ export function App() {
                         defaultModel: msg.defaultModel,
                         models: msg.models,
                         contextWindows: msg.contextWindows ?? {},
+                        capabilities: msg.capabilities ?? {},
                     });
                     setSelectedModel((c) => msg.selectedModel ?? c ?? (msg.defaultModel || null));
                     setVisionCapable(msg.visionCapable ?? null);
@@ -575,6 +578,13 @@ export function App() {
     const sessionCost = useMemo(
         () => sumCosts(chat.messages.map((m) => m.usage?.cost)),
         [chat.messages]
+    );
+
+    // Per-model windows for the picker badges: the served table with the
+    // user's explicit overrides applied, so a badge reflects what the user set.
+    const modelWindowsMerged = useMemo(
+        () => ({ ...(modelInfo?.contextWindows ?? {}), ...ctxOverrides }),
+        [modelInfo, ctxOverrides]
     );
 
     // ones render read-only from their own args (stepId no longer matches).
@@ -925,6 +935,8 @@ export function App() {
                 injectedText={injectedText}
                 onInjectedApplied={() => setInjectedText(null)}
                 models={modelInfo?.models ?? []}
+                modelCapabilities={modelInfo?.capabilities}
+                modelWindows={modelWindowsMerged}
                 selectedModel={selectedModel}
                 onSelectModel={(m) => {
                     setSelectedModel(m);
