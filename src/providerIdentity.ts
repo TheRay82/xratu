@@ -54,7 +54,8 @@ export const PROVIDER_LABELS: Record<string, string> = {
     deepseek: 'DeepSeek', mistral: 'Mistral', together: 'Together AI',
     fireworks: 'Fireworks AI', cerebras: 'Cerebras', anthropic: 'Anthropic',
     google: 'Google Gemini', xai: 'xAI', ollama: 'Ollama', lmstudio: 'LM Studio',
-    opencode: 'OpenCode Zen', perplexity: 'Perplexity', cohere: 'Cohere',
+    opencode: 'OpenCode Zen', 'opencode-go': 'OpenCode Go',
+    perplexity: 'Perplexity', cohere: 'Cohere',
     nvidia: 'NVIDIA NIM', huggingface: 'Hugging Face', sambanova: 'SambaNova',
     moonshot: 'Moonshot AI', zai: 'Z.AI', vllm: 'vLLM',
     avalai: 'Avalai', metis: 'Metis AI', liara: 'Liara AI',
@@ -62,21 +63,32 @@ export const PROVIDER_LABELS: Record<string, string> = {
     custom: 'Custom',
 };
 
-/** @internal Exposed for tests. Returns the host (hostname[:port]) or null. */
-export function baseUrlHost(baseUrl: string): string | null {
-    const raw = baseUrl.trim().toLowerCase();
+function parseBaseUrl(baseUrl: string): URL | null {
+    const raw = baseUrl.trim();
     if (!raw) return null;
     const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
     try {
-        return new URL(withScheme).host;
+        return new URL(withScheme);
     } catch {
         return null;
     }
 }
 
+/** @internal Exposed for tests. Returns the host (hostname[:port]) or null. */
+export function baseUrlHost(baseUrl: string): string | null {
+    return parseBaseUrl(baseUrl)?.host.toLowerCase() ?? null;
+}
+
 export function providerIdForUrl(baseUrl: string): string {
-    const host = baseUrlHost(baseUrl);
-    if (!host) return 'custom';
+    const parsed = parseBaseUrl(baseUrl);
+    if (!parsed) return 'custom';
+    const host = parsed.host.toLowerCase();
+    // OpenCode Zen and Go share the opencode.ai host - the PATH tells them
+    // apart (Go lives under /zen/go/v1). Test the parsed pathname so a query
+    // or fragment cannot hide it.
+    if (host === 'opencode.ai' || host.endsWith('.opencode.ai')) {
+        return /\/zen\/go(?:\/|$)/i.test(parsed.pathname) ? 'opencode-go' : 'opencode';
+    }
     for (const [fragment, id] of PROVIDER_HOSTS) {
         // Match the HOST only, on an exact or dot-boundary basis. Matching the
         // whole URL with `includes` let a path, user-info or lookalike domain

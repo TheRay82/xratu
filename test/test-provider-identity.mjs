@@ -33,6 +33,7 @@ const PRESETS = [
     ['https://api.arvancloud.ir/ai/v1', 'arvan'],
     ['https://api.navaan.ai/v1', 'navaan'],
     ['https://opencode.ai/zen/v1', 'opencode'],
+    ['https://opencode.ai/zen/go/v1', 'opencode-go'],
     ['https://api.groq.com/openai/v1', 'groq'],
     ['https://api.deepseek.com', 'deepseek'],
     ['https://api.mistral.ai/v1', 'mistral'],
@@ -65,6 +66,13 @@ check('lookalike host -> custom', providerIdForUrl('https://notopenai.com/v1'), 
 check('userinfo lookalike -> custom', providerIdForUrl('https://api.openai.com@evil.example/v1'), 'custom');
 check('dot-boundary subdomain -> provider', providerIdForUrl('https://foo.api.openai.com/v1'), 'openai');
 
+// --- OpenCode Zen vs Go share a host; the path decides (query/fragment too) ---
+check('opencode zen path', providerIdForUrl('https://opencode.ai/zen/v1'), 'opencode');
+check('opencode go path', providerIdForUrl('https://opencode.ai/zen/go/v1'), 'opencode-go');
+check('opencode go path + query', providerIdForUrl('https://opencode.ai/zen/go/v1?region=us'), 'opencode-go');
+check('opencode go bare path', providerIdForUrl('https://opencode.ai/zen/go'), 'opencode-go');
+check('opencode zen + query is not go', providerIdForUrl('https://opencode.ai/zen/v1?x=1'), 'opencode');
+
 // --- Legacy generic xAI host still resolves ---
 check('legacy x.ai root -> xai', providerIdForUrl('https://x.ai/v1'), 'xai');
 check('legacy x.ai subdomain -> xai', providerIdForUrl('https://api2.x.ai/v1'), 'xai');
@@ -74,6 +82,8 @@ check('perplexity not mistaken for x.ai', providerIdForUrl('https://api.perplexi
 // --- Labels mirror the preset names exactly ---
 check('kaya label', providerLabelForUrl('https://kayaai.ir/api'), 'Kaya AI');
 check('avalai label', providerLabelForUrl('https://api.avalai.ir/v1'), 'Avalai');
+check('opencode zen label', providerLabelForUrl('https://opencode.ai/zen/v1'), 'OpenCode Zen');
+check('opencode go label', providerLabelForUrl('https://opencode.ai/zen/go/v1'), 'OpenCode Go');
 check('navaan label', providerLabelForUrl('https://api.navaan.ai/v1'), 'Navaan');
 check('zai label', providerLabelForUrl('https://api.z.ai/api/paas/v4'), 'Z.AI');
 check('nvidia label', providerLabelForUrl('https://integrate.api.nvidia.com/v1'), 'NVIDIA NIM');
