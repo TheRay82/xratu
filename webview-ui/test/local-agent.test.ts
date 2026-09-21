@@ -1661,6 +1661,254 @@ async function testCancelDuringRetryBackoffIsAbortError() {
     }
 }
 
+async function testMessagesThinkingBudget() {
+    const calls: any[] = [];
+    const originalFetch = globalThis.fetch;
+    const frames = [
+        `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 5, output_tokens: 0 } } })}\n\n`,
+        `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text' } })}\n\n`,
+        `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } })}\n\n`,
+        `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+    ];
+    globalThis.fetch = (async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        return sse(frames);
+    }) as typeof fetch;
+
+    try {
+        await collect(
+            runLocalAgent(baseRequest({
+                apiStyle: 'messages',
+                model: 'claude-sonnet-5',
+                apiKey: 'sk-test',
+                reasoningEffort: 'high',
+                maxTokens: 4096,
+                temperature: 0.7,
+                contextWindow: 200000,
+            }), {
+                execute: async () => ({ output: '' }),
+            }, {
+                requestApproval: async () => ({}),
+            })
+        );
+
+        assert.equal(calls[0].thinking.type, 'enabled', 'thinking block is sent');
+        assert.equal(calls[0].thinking.budget_tokens, 24576, 'high level budget');
+        assert.ok(calls[0].max_tokens > calls[0].thinking.budget_tokens, 'max_tokens must exceed the budget');
+        assert.equal(calls[0].temperature, undefined, 'temperature is dropped when thinking is enabled');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
+async function testMessagesThinkingRejectedRetriesWithout() {
+    const calls: any[] = [];
+    const originalFetch = globalThis.fetch;
+    let call = 0;
+    globalThis.fetch = (async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        call++;
+        if (call === 1) {
+            return {
+                ok: false,
+                status: 400,
+                text: async () => '{"error":"thinking is not supported for this model"}',
+            } as MockResponse;
+        }
+        return sse([
+            `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 5, output_tokens: 0 } } })}\n\n`,
+            `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text' } })}\n\n`,
+            `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } })}\n\n`,
+            `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+        ]);
+    }) as typeof fetch;
+
+    try {
+        await collect(
+            runLocalAgent(baseRequest({
+                apiStyle: 'messages',
+                model: 'claude-sonnet-5',
+                apiKey: 'sk-test',
+                reasoningEffort: 'high',
+                maxTokens: 2048,
+                temperature: 0.3,
+            }), {
+                execute: async () => ({ output: '' }),
+            }, {
+                requestApproval: async () => ({}),
+            })
+        );
+
+        assert.equal(call, 2, 'retries once without thinking');
+        assert.ok(calls[0].thinking, 'first request enables thinking');
+        assert.equal(calls[1].thinking, undefined, 'retry drops the thinking block');
+        // Dropping thinking must also undo the thinking-specific mutations:
+        // the temperature it suppressed comes back, and the raised cap resets.
+        assert.equal(calls[1].temperature, 0.3, 'temperature restored on retry');
+        assert.equal(calls[1].max_tokens, 2048, 'explicit cap restored on retry');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
+async function testMaxOutputLimitLowersDerivedCap() {
+    const calls: any[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        return sse(textSse(['ok']));
+    }) as typeof fetch;
+
+    try {
+        await collect(
+            runLocalAgent(baseRequest({ contextWindow: 200000, maxOutputLimit: 2048 }), {
+                execute: async () => ({ output: '' }),
+            }, {
+                requestApproval: async () => ({}),
+            })
+        );
+        // Without the limit the derived cap would be 16384.
+        assert.equal(calls[0].max_tokens, 2048, 'provider max output lowers the derived cap');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
+async function testExplicitMaxTokensBeatsOutputLimit() {
+    const calls: any[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        return sse(textSse(['ok']));
+    }) as typeof fetch;
+
+    try {
+        await collect(
+            runLocalAgent(baseRequest({ contextWindow: 200000, maxTokens: 512, maxOutputLimit: 2048 }), {
+                execute: async () => ({ output: '' }),
+            }, {
+                requestApproval: async () => ({}),
+            })
+        );
+        assert.equal(calls[0].max_tokens, 512, 'an explicit caller cap wins over the provider limit');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
+async function testChatReasoningEffortRejectedRetriesWithout() {
+    const calls: any[] = [];
+    const originalFetch = globalThis.fetch;
+    let call = 0;
+    globalThis.fetch = (async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        call++;
+        if (call === 1) {
+            return {
+                ok: false,
+                status: 400,
+                text: async () => '{"error":"reasoning_effort is not supported by this model"}',
+            } as MockResponse;
+        }
+        return sse(textSse(['ok']));
+    }) as typeof fetch;
+
+    try {
+        const events = await collect(
+            runLocalAgent(baseRequest({ reasoningEffort: 'medium' }), {
+                execute: async () => ({ output: '' }),
+            }, {
+                requestApproval: async () => ({}),
+            })
+        );
+
+        assert.equal(call, 2, 'retries once without reasoning_effort');
+        assert.equal(calls[0].reasoning_effort, 'medium');
+        assert.equal(calls[1].reasoning_effort, undefined);
+        assert.ok(events.some((e: any) => e.type === 'assistantMessage'));
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
+async function testGoogleThinkingConfig() {
+    const calls: any[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        return sse([
+            `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'ok' }] } }] })}\n\n`,
+        ]);
+    }) as typeof fetch;
+
+    try {
+        await collect(
+            runLocalAgent(baseRequest({
+                apiStyle: 'google',
+                model: 'gemini-3.8-flash',
+                apiKey: 'g-key',
+                reasoningEffort: 'medium',
+                contextWindow: 128000,
+            }), {
+                execute: async () => ({ output: '' }),
+            }, {
+                requestApproval: async () => ({}),
+            })
+        );
+
+        const config = calls[0].generationConfig;
+        assert.equal(config.thinkingConfig.thinkingBudget, 8192, 'medium budget forwarded');
+        assert.equal(config.thinkingConfig.includeThoughts, true, 'thoughts requested');
+        assert.ok(config.maxOutputTokens > config.thinkingConfig.thinkingBudget, 'output cap clears the budget');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
+async function testGoogleThinkingRejectedRestoresCap() {
+    const calls: any[] = [];
+    const originalFetch = globalThis.fetch;
+    let call = 0;
+    globalThis.fetch = (async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        call++;
+        if (call === 1) {
+            return {
+                ok: false,
+                status: 400,
+                text: async () => '{"error":"thinkingConfig is not supported by this model"}',
+            } as MockResponse;
+        }
+        return sse([
+            `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'ok' }] } }] })}\n\n`,
+        ]);
+    }) as typeof fetch;
+
+    try {
+        await collect(
+            runLocalAgent(baseRequest({
+                apiStyle: 'google',
+                model: 'gemini-3.8-flash',
+                apiKey: 'g-key',
+                reasoningEffort: 'high',
+                contextWindow: 200000,
+            }), {
+                execute: async () => ({ output: '' }),
+            }, {
+                requestApproval: async () => ({}),
+            })
+        );
+
+        // derived cap is 16384; high budget 24576 raises it to 28672.
+        assert.equal(calls[0].generationConfig.thinkingConfig.thinkingBudget, 24576);
+        assert.equal(calls[0].generationConfig.maxOutputTokens, 28672, 'cap raised for the budget');
+        assert.equal(calls[1].generationConfig.thinkingConfig, undefined, 'thinkingConfig dropped');
+        assert.equal(calls[1].generationConfig.maxOutputTokens, 16384, 'cap restored after drop');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
 async function main() {
     await testMessagesApiTextThinkingAndUsage();
     await testMessagesApiToolUse();
@@ -1695,6 +1943,13 @@ async function main() {
     await testWrapupWithoutTextEmitsFallback();
     await testWrapupReasoningIsForwarded();
     await testWrapupOverflowCompactsAndRetries();
+    await testMessagesThinkingBudget();
+    await testMessagesThinkingRejectedRetriesWithout();
+    await testMaxOutputLimitLowersDerivedCap();
+    await testExplicitMaxTokensBeatsOutputLimit();
+    await testChatReasoningEffortRejectedRetriesWithout();
+    await testGoogleThinkingConfig();
+    await testGoogleThinkingRejectedRestoresCap();
 
     console.log('local-agent.test.ts: all tests passed');
 }
