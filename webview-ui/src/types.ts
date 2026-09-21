@@ -80,6 +80,11 @@ export type ToExtensionMessage =
     /** User edit of the session task list (interactive checklist). The host
      *  stores it as the session override and echoes taskListState. */
     | { type: 'taskListEdit'; tasks: TaskListItem[] }
+    /** Usage page: request the current usage + model price overrides. */
+    | { type: 'usageGetState' }
+    /** Usage page: set a per-model price override (currency defaults to USD). */
+    | { type: 'usageSaveModel'; id: string; input: number; output: number; cachedInput?: number | null; currency?: 'USD' | 'IRT' }
+    | { type: 'usageRemoveModel'; id: string }
     /** Copy a code block to the OS clipboard via the host (webview clipboard
      *  permissions are unreliable). */
     | { type: 'copyToClipboard'; value: string };
@@ -286,7 +291,79 @@ export type FromExtensionMessage =
     | { type: 'skillsState'; skills: SkillView[] }
     /** Host-echoed current task list (user override merged; null when the
      *  session has none). Drives the interactive checklist + progress chip. */
-    | { type: 'taskListState'; tasks: TaskListItem[] | null };
+    | { type: 'taskListState'; tasks: TaskListItem[] | null }
+    /** Response to usageGetState / usage* edits - the Usage page's view. */
+    | {
+          type: 'usageState';
+          /** All-time usage per provider, busiest first. */
+          providers: ProviderUsageView[];
+          /** The effective rate for every model used, plus override-only rows. */
+          rates: ModelRateView[];
+          /** Sparse per-day / per-model / per-host cells (only days with use). */
+          history: LedgerDay[];
+          /** Machine-global totals across every recorded day. */
+          allTime: UsageTotals;
+      };
+
+/** All-time usage + cost for one provider, for the provider usage list. */
+export interface ProviderUsageView {
+    host: string;
+    label: string;
+    /** Known Iranian (Toman-billed) provider. */
+    iranian: boolean;
+    input: number;
+    output: number;
+    cached: number;
+    USD: number;
+    IRT: number;
+}
+
+/** One (day, model, host) aggregation cell. */
+export interface LedgerCell {
+    model: string;
+    host: string;
+    input: number;
+    output: number;
+    cached: number;
+    USD: number;
+    IRT: number;
+}
+
+/** A day that saw usage. */
+export interface LedgerDay {
+    /** Local day, YYYY-MM-DD. */
+    day: string;
+    cells: LedgerCell[];
+}
+
+/** Token + per-currency cost totals. */
+export interface UsageTotals {
+    input: number;
+    output: number;
+    cached: number;
+    USD: number;
+    IRT: number;
+}
+
+/** Where an effective per-model rate came from. */
+export type ModelRateSource = 'override' | 'gateway' | 'builtin' | 'unknown';
+
+/** One rate-sheet row on the Usage page: a model's effective rate and its
+ *  origin. An override is host-independent, so its `host` is empty. */
+export interface ModelRateView {
+    id: string;
+    /** Provider host the rate applies to; '' for an override. */
+    host: string;
+    /** Rate per 1M tokens, in `currency`. */
+    input: number;
+    output: number;
+    cachedInput: number | null;
+    currency: 'USD' | 'IRT';
+    source: ModelRateSource;
+    /** All-time cost for this row's scope, per currency (never converted). */
+    USD: number;
+    IRT: number;
+}
 
 // ---------------------------------------------------------------------------
 // MCP page model

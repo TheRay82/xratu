@@ -40,7 +40,7 @@ import {
 } from 'lucide-react';
 import type { ApprovalPayload, ChatMessage, ConnectionStatus, Step, TaskListItem, TaskListStatus } from '../types';
 import { RenderedMarkdown } from './RenderedMarkdown';
-import { t, getLocale } from '../i18n';
+import { t } from '../i18n';
 import { formatFullTimestamp, formatMessageTimestamp } from '../datetime';
 import { formatCost } from '../cost';
 
@@ -1266,12 +1266,19 @@ function TaskListRow({ row, view, streaming }: { row: Extract<Row, { kind: 'task
 function TextSegmentRow({ steps, streaming }: { steps: Step[]; streaming: boolean }) {
     const allHtml = steps.every((s) => s.html);
     if (allHtml) {
-        return <RenderedMarkdown html={steps.map((s) => s.html as string).join('')} streaming={streaming} />;
+        return <RenderedMarkdown html={steps.map((s) => s.html as string).join('')} streaming={streaming} live={streaming} />;
     }
     return (
-        <div className={`step-text-seg${streaming ? ' streaming' : ''}`} dir="auto">
+        <div
+            className={`step-text-seg${streaming ? ' streaming' : ''}`}
+            dir="auto"
+            aria-live={streaming ? 'polite' : undefined}
+            aria-atomic={streaming ? 'false' : undefined}
+        >
             {steps.map((step) =>
                 step.html ? (
+                    // The wrapper is already the polite live region for this
+                    // row: a nested one would announce the HTML twice.
                     <RenderedMarkdown key={step.id} html={step.html} streaming={streaming} />
                 ) : (
                     <span key={step.id}>{step.text}</span>
@@ -1629,7 +1636,7 @@ function ApprovalCard({
     );
 }
 
-function MessageItemImpl({ message, onApprovalDecision, onRegenerate, onEditMessage, onRestoreCheckpoint, userIndex, isLastAssistant, busy, conn, taskList }: MessageItemProps) {
+function MessageItemImpl({ message, onApprovalDecision, onRegenerate, onEditMessage, onRestoreCheckpoint, userIndex, isLastAssistant, busy, conn, taskList, dir = 'ltr' }: MessageItemProps) {
     const { role, status, renderedHtml, text, steps, tone, attachments } = message;
     const approvalPending = !!message.approval && !message.approval.resolution;
     const approvalResolved = !!message.approval?.resolution;
@@ -1706,10 +1713,12 @@ function MessageItemImpl({ message, onApprovalDecision, onRegenerate, onEditMess
     return (
         <article
             className={`${bubbleClass}${approvalPending ? ' approval-paused' : ''}`}
-            /* dir="auto" resolves to LTR while only the typing dots render
-               (no text for the first-strong heuristic) - pin to the app
-               locale direction so the indicator follows Farsi bubbles. */
-            dir={isTyping ? (getLocale() === 'fa' ? 'rtl' : 'ltr') : 'auto'}
+            /* Direction comes from the APP LOCALE (passed in), not dir="auto":
+               first-strong detection would flip a Persian message that begins
+               with Latin ("npm رو اجرا کن"). Code/paths/URLs force their own
+               direction. locale rides as a prop so the memo comparator below
+               re-renders existing bubbles when the language flips. */
+            dir={dir}
             aria-busy={status === 'streaming' && !approvalPending}
         >
             {!isSystem && hasPills && (
@@ -1771,9 +1780,14 @@ function MessageItemImpl({ message, onApprovalDecision, onRegenerate, onEditMess
                     <>
                         {textRows.map((r) =>
                             r.steps.every((s) => s.html) ? (
-                                <RenderedMarkdown key={r.key} html={r.steps.map((s) => s.html as string).join('')} streaming={streamingContent} />
+                                <RenderedMarkdown key={r.key} html={r.steps.map((s) => s.html as string).join('')} streaming={streamingContent} live={streamingContent} />
                             ) : (
-                                <div key={r.key} className={`msg-content msg-text${streamingContent ? ' streaming' : ''}`}>
+                                <div
+                                    key={r.key}
+                                    className={`msg-content msg-text${streamingContent ? ' streaming' : ''}`}
+                                    aria-live={streamingContent ? 'polite' : undefined}
+                                    aria-atomic={streamingContent ? 'false' : undefined}
+                                >
                                     {r.steps.map((s) => s.text).join('\n')}
                                 </div>
                             )
@@ -1781,7 +1795,7 @@ function MessageItemImpl({ message, onApprovalDecision, onRegenerate, onEditMess
                     </>
                 )
             ) : renderedHtml ? (
-                <RenderedMarkdown html={renderedHtml} streaming={streamingContent} />
+                <RenderedMarkdown html={renderedHtml} streaming={streamingContent} live={streamingContent} />
             ) : isTyping ? (
                 <div className={`msg-content typing${message.retryStatus ? ' retrying' : ''}`} aria-label={t('typingAria')}>
                     <span className="dot" />
@@ -1791,7 +1805,13 @@ function MessageItemImpl({ message, onApprovalDecision, onRegenerate, onEditMess
             ) : message.retryStatus ? (
                 <RetryCountdown retryStatus={message.retryStatus} />
             ) : text ? (
-                <div className={`msg-content msg-text${streamingContent ? ' streaming' : ''}`}>
+                <div
+                    className={`msg-content msg-text${streamingContent ? ' streaming' : ''}`}
+                    /* Live region scoped to THIS message so screen readers hear
+                       the response as it streams, not the whole log. */
+                    aria-live={streamingContent ? 'polite' : undefined}
+                    aria-atomic="false"
+                >
                     {text}
                 </div>
             ) : null}
@@ -1917,6 +1937,8 @@ interface MessageItemProps {
      *  (host-echoed list + edit handler); undefined = all checklists
      *  render read-only from their own args. */
     taskList?: TaskListView;
+    /** Locale-derived bubble direction from the app root. */
+    dir?: 'rtl' | 'ltr';
 }
 
 /**
@@ -1934,5 +1956,6 @@ export const MessageItem = memo(MessageItemImpl, (a, b) =>
     a.isLastAssistant === b.isLastAssistant &&
     a.busy === b.busy &&
     a.conn === b.conn &&
-    a.taskList === b.taskList
+    a.taskList === b.taskList &&
+    a.dir === b.dir
 );

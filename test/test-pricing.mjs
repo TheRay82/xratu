@@ -6,7 +6,7 @@
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { priceForModel, costForUsage } = require('../out/pricing.js');
+const { priceForModel, resolvePrice, costForUsage } = require('../out/pricing.js');
 
 let failed = 0;
 const check = (name, actual, expected) => {
@@ -60,6 +60,91 @@ near('cached clamped to prompt', clamped.amount, (1000 * 0.2) / 1_000_000, 1e-12
 check('zero usage -> null', costForUsage(sonnet, { promptTokens: 0, completionTokens: 0 }), null);
 check('null tokens -> null', costForUsage(sonnet, { promptTokens: null, completionTokens: null }), null);
 check('IRT currency passthrough', costForUsage(sonnet, { promptTokens: 1_000_000, completionTokens: 0 }, 'IRT').currency, 'IRT');
+
+// --- Currency + provider-aware (Toman) resolution ---
+const irtOverride = priceForModel('my-model', { 'my-model': { input: 1000, output: 2000, currency: 'IRT' } });
+check('override currency IRT', irtOverride?.currency, 'IRT');
+check('override IRT input untouched', irtOverride?.input, 1000);
+
+// A USD override must stay USD even on a Toman-billed provider: it carries an
+// explicit currency so the host does not fall through to the IRT ledger.
+const usdOverride = priceForModel(
+    'claude-sonnet-5',
+    { 'claude-sonnet-5': { input: 3, output: 9 } },
+    { host: 'api.avalai.ir', iranian: true, fallbackRate: 100 },
+);
+check('USD override carries USD currency', usdOverride?.currency, 'USD');
+check('USD override beats gateway rate', usdOverride?.input, 3);
+
+const gw = priceForModel('claude-sonnet-5', null, {
+    host: 'api.avalai.ir', iranian: true, gatewayRate: { tomanPerUsd: 100 },
+});
+check('gateway rate -> IRT', gw?.currency, 'IRT');
+check('gateway rate scales input', gw?.input, 200);
+
+const gwMarkup = priceForModel('claude-sonnet-5', null, {
+    host: 'api.avalai.ir', iranian: true, gatewayRate: { tomanPerUsd: 100, markupPercent: 10 },
+});
+near('gateway markup applied', gwMarkup?.input, 220, 1e-9);
+
+const gwNegative = priceForModel('claude-sonnet-5', null, {
+    host: 'api.avalai.ir', iranian: true, gatewayRate: { tomanPerUsd: 100, markupPercent: -50 },
+});
+check('negative markup ignored', gwNegative?.input, 200);
+
+check(
+    'Iranian provider with no Toman data -> null',
+    priceForModel('claude-sonnet-5', null, { host: 'api.avalai.ir', iranian: true }),
+    null,
+);
+
+const fb = priceForModel('claude-sonnet-5', null, { host: 'x.ir', iranian: true, fallbackRate: 50 });
+check('fallback rate -> IRT', fb?.currency, 'IRT');
+check('fallback rate scales input', fb?.input, 100);
+
+const custom = priceForModel('claude-sonnet-5', null, { host: 'gw.example', gatewayRate: { tomanPerUsd: 10 } });
+check('custom gateway -> IRT', custom?.currency, 'IRT');
+check('custom gateway scales input', custom?.input, 20);
+
+check('non-Iranian host stays USD', priceForModel('claude-sonnet-5', null, { host: 'api.openai.com' })?.currency, undefined);
+check('non-Iranian host keeps USD rate', priceForModel('claude-sonnet-5', null, { host: 'api.openai.com' })?.input, 2);
+
+const irtCost = costForUsage(
+    { input: 1000, output: 2000, currency: 'IRT' },
+    { promptTokens: 1_000_000, completionTokens: 0 },
+);
+check('cost uses the price currency', irtCost.currency, 'IRT');
+near('cost amount in IRT', irtCost.amount, 1000, 1e-9);
+
+// --- Rate sources (the Usage page labels every effective rate) ---
+check('source: curated USD table', resolvePrice('claude-sonnet-5')?.source, 'usd-table');
+check('source: user override', resolvePrice('claude-sonnet-5', { 'claude-sonnet-5': { input: 1, output: 2 } })?.source, 'override');
+check(
+    'source: gateway conversion',
+    resolvePrice('claude-sonnet-5', null, { host: 'api.avalai.ir', iranian: true, gatewayRate: { tomanPerUsd: 100 } })?.source,
+    'gateway',
+);
+check(
+    'source: fallback rate is still a gateway conversion',
+    resolvePrice('claude-sonnet-5', null, { host: 'x.ir', iranian: true, fallbackRate: 50 })?.source,
+    'gateway',
+);
+check(
+    'source: unknown model resolves to nothing',
+    resolvePrice('some-local-model'),
+    null,
+);
+// priceForModel stays the thin wrapper it always was.
+check('priceForModel matches resolvePrice', priceForModel('claude-sonnet-5')?.input, resolvePrice('claude-sonnet-5')?.price.input);
+
+// --- Cached-rate fallback: an omitted rate is NOT a free rate ---
+const noCached = priceForModel('claude-sonnet-5', { 'claude-sonnet-5': { input: 2, output: 10 } });
+check('omitted cachedInput falls back to input', costForUsage(noCached, { promptTokens: 1_000_000, completionTokens: 0, cachedTokens: 1_000_000 }).amount, 2);
+const zeroCached = priceForModel('claude-sonnet-5', { 'claude-sonnet-5': { input: 2, output: 10, cachedInput: 0 } });
+// A free cached rate makes an all-cached round cost nothing, which the cost
+// helper reports as "no cost" rather than 0 - the point is that it is NOT the
+// same as the fallback above.
+check('explicit zero cached rate costs nothing', costForUsage(zeroCached, { promptTokens: 1_000_000, completionTokens: 0, cachedTokens: 1_000_000 }), null);
 
 console.log(failed === 0 ? '\npricing: all tests passed' : `\npricing: ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

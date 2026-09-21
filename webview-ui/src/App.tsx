@@ -28,10 +28,12 @@ import { InputBar } from './components/InputBar';
 import { SettingsPage } from './components/SettingsPage';
 import { CapabilitiesPage } from './components/CapabilitiesPage';
 import { Welcome } from './components/Welcome';
+import { UsagePage } from './components/UsagePage';
 import { NotificationBanner } from './components/NotificationBanner';
 import { getLocale, setLocale, t, tf, tOrRaw } from './i18n';
+import type { LedgerDay, ModelRateView, ProviderUsageView, UsageTotals } from './types';
 
-type Screen = 'boot' | 'welcome' | 'chat' | 'credentials' | 'settings' | 'capabilities';
+type Screen = 'boot' | 'welcome' | 'chat' | 'credentials' | 'settings' | 'capabilities' | 'usage';
 
 /** Composer attachments → persisted-history shape (base64 dropped, images
  *  keep an inline preview for the just-sent bubble). */
@@ -75,6 +77,14 @@ export function App() {
     const [credReturnTo, setCredReturnTo] = useState<'chat' | 'settings'>('chat');
     /** Same return-tracking for the capabilities page's Back button. */
     const [capReturnTo, setCapReturnTo] = useState<'chat' | 'settings'>('chat');
+    /** Usage page data (host-owned settings) + its Back target. */
+    const [usage, setUsage] = useState<{
+        providers: ProviderUsageView[];
+        rates: ModelRateView[];
+        history: LedgerDay[];
+        allTime: UsageTotals;
+    } | null>(null);
+    const [usageReturnTo, setUsageReturnTo] = useState<'chat' | 'settings'>('settings');
     const [savedCredentials, setSavedCredentials] = useState<SavedCredential[]>([]);
     const [injectedText, setInjectedText] = useState<{ id: number; text: string } | null>(null);
     // Workspace-relative path of the file open in the active editor - the
@@ -381,6 +391,14 @@ export function App() {
                     break;
                 case 'taskListState':
                     setTaskList(msg.tasks);
+                    break;
+                case 'usageState':
+                    setUsage({
+                        providers: msg.providers,
+                        rates: msg.rates,
+                        history: msg.history,
+                        allTime: msg.allTime,
+                    });
                     break;
                 case 'modelInfo':
                     setModelInfo({
@@ -690,6 +708,21 @@ export function App() {
         );
     }
 
+    if (screen === 'usage') {
+        return (
+            <div className="app" dir={locale === 'fa' ? 'rtl' : 'ltr'}>
+                <UsagePage
+                    state={usage}
+                    onBack={() => setScreen(usageReturnTo)}
+                    onSaveModel={(id, input, output, cachedInput, currency) =>
+                        send({ type: 'usageSaveModel', id, input, output, cachedInput, currency })}
+                    onRemoveModel={(id) => send({ type: 'usageRemoveModel', id })}
+                />
+                {banner}
+            </div>
+        );
+    }
+
     if (screen === 'settings') {
         return (
             <div className="app" dir={locale === 'fa' ? 'rtl' : 'ltr'}>
@@ -712,6 +745,11 @@ export function App() {
                         setScreen('capabilities');
                         send({ type: 'mcpGetState' });
                         send({ type: 'skillsGetState' });
+                    }}
+                    onOpenUsage={() => {
+                        setUsageReturnTo('settings');
+                        setScreen('usage');
+                        send({ type: 'usageGetState' });
                     }}
                     onClearHistory={() => {
                         // "Clear history" really clears: every stored session
@@ -916,6 +954,11 @@ export function App() {
                 busy={chat.busy}
                 usage={chat.lastUsage}
                 sessionCost={chat.sessionCost}
+                onOpenUsage={() => {
+                    setUsageReturnTo('chat');
+                    setScreen('usage');
+                    send({ type: 'usageGetState' });
+                }}
                 contextWindow={
                     (selectedModel ? ctxOverrides[selectedModel] : undefined) ??
                     resolveWindow(modelInfo?.contextWindows, selectedModel)
