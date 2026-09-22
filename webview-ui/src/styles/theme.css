@@ -67,6 +67,36 @@
     box-sizing: border-box;
 }
 
+/* One scrollbar treatment across the whole webview - thin, transparent track,
+   rounded themed thumb (the same look the tool-step dropdowns use). Areas that
+   deliberately hide their scrollbar override this with `scrollbar-width: none`. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.2)) transparent;
+}
+
+*::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.2));
+    border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: var(--vscode-scrollbarSlider-hoverBackground, rgba(255, 255, 255, 0.3));
+}
+
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
 /* Light themes invert the elevation: the editor is the lightest surface, so
    the assistant turn stays at editor tone and the user turn is a soft step
    toward the foreground. */
@@ -256,7 +286,6 @@ button {
 .session-pop-list {
     overflow-y: auto;
     max-height: 42vh;
-    scrollbar-width: none;
     padding: 0 6px;
 }
 
@@ -506,6 +535,10 @@ button {
        touch, auto-follow) is unaffected; the jump button + edge fade keep
        orientation. */
     scrollbar-width: none;
+}
+
+.messages::-webkit-scrollbar {
+    display: none;
 }
 
 .messages::-webkit-scrollbar {
@@ -1846,6 +1879,35 @@ button {
     white-space: nowrap;
 }
 
+/* When the summary also carries the command, the label stops growing so the
+   command (which can be long) takes the remaining space and ellipsizes. */
+.step-label-fixed {
+    flex: 0 0 auto;
+}
+
+.step-cmd {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: ltr;
+    text-align: left;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11.5px;
+    color: var(--vscode-descriptionForeground);
+}
+
+/* While OPEN, the body prints the command in full (wrapped), so the summary
+   copy would be a duplicate - hide it and let the label grow again. */
+.step[open] > summary .step-cmd {
+    display: none;
+}
+
+.step[open] > summary .step-label-fixed {
+    flex: 1 1 auto;
+}
+
 .step.running .step-label {
     color: var(--vscode-foreground);
 }
@@ -2185,7 +2247,6 @@ button {
 .task-list-chip-menu-list {
     overflow-y: auto;
     max-height: 42vh;
-    scrollbar-width: none;
     padding: 0 6px;
 }
 
@@ -2233,7 +2294,7 @@ button {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 2px 0 8px;
+    padding: 4px 0 8px;
 }
 
 /* The open body is tied to its pill by one rail that drops straight from the
@@ -2296,8 +2357,16 @@ button {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding-bottom: 4px;
+    padding: 2px 0 5px;
     border-bottom: 1px solid color-mix(in srgb, var(--vscode-widget-border) 45%, transparent);
+}
+
+/* One file's diff block. Same gap as the body itself, so a run of files reads
+   as one continuous list instead of a hole between sections. */
+.edit-file {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
 }
 
 .edit-file-path {
@@ -2354,29 +2423,17 @@ button {
     background: var(--xratu-accent-faint);
 }
 
-/* Unparseable patch: NEVER wrap the markers into a wall - a no-wrap scroll
-   box keeps SEARCH/REPLACE blocks legible. */
+/* Unparseable patch: NEVER wrap the markers into a wall. Plain monospace on
+   the message surface (no box), with a no-wrap horizontal scroll. */
 .step pre.pill-patch-pre {
     white-space: pre;
     overflow-x: auto;
     max-height: 220px;
-    padding: 6px 8px;
-    border-radius: var(--xratu-radius-xs);
-    background: color-mix(in srgb, var(--vscode-sideBar-background) 70%, #000);
-    scrollbar-width: thin;
-}
-
-.pill-patch-note {
-    margin: 0 0 4px;
-    font-size: var(--xratu-fs-xs);
-    color: var(--vscode-descriptionForeground);
-    opacity: 0.85;
+    padding: 0;
 }
 
 .step-io-tag {
     font-size: var(--xratu-fs-xs);
-    letter-spacing: 0.4px;
-    text-transform: uppercase;
     color: var(--vscode-descriptionForeground);
     opacity: 0.8;
 }
@@ -2387,6 +2444,9 @@ button {
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 12.5px;
     white-space: pre-wrap;
+    /* Long unbreakable strings (URLs, paths) wrap instead of forcing a
+       horizontal scrollbar on an otherwise wrapped block. */
+    overflow-wrap: anywhere;
     overflow-x: auto;
     max-height: 200px;
     text-align: left;
@@ -2427,7 +2487,9 @@ pre.tool-cmd {
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 12.5px;
     color: var(--xratu-accent);
-    word-break: break-all;
+    /* `anywhere` (not break-all): a URL breaks at a sensible point instead of
+       mid-token wherever the box happens to end. */
+    overflow-wrap: anywhere;
     text-align: left;
 }
 
@@ -2478,8 +2540,8 @@ pre.tool-cmd {
 .pill-diff-line {
     display: flex;
     align-items: baseline;
-    min-height: 1.4em;
-    padding: 0 6px 0 0;
+    min-height: 1.55em;
+    padding: 1px 6px 1px 0;
 }
 
 .pill-diff-line.del {
@@ -2579,7 +2641,7 @@ pre.tool-cmd {
 .term-out {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
 }
 
 .term-out pre {
@@ -2592,27 +2654,7 @@ pre.tool-cmd {
    a thin themed slider; overscroll containment stops the wheel from chaining
    into the transcript scroller at either end. */
 .term-live {
-    scrollbar-width: thin;
-    scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.2)) transparent;
     overscroll-behavior: contain;
-}
-
-.term-live::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-}
-
-.term-live::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.term-live::-webkit-scrollbar-thumb {
-    background: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.2));
-    border-radius: 4px;
-}
-
-.term-live::-webkit-scrollbar-thumb:hover {
-    background: var(--vscode-scrollbarSlider-hoverBackground, rgba(255, 255, 255, 0.3));
 }
 
 .term-err {
@@ -4141,7 +4183,6 @@ pre.tool-cmd {
     height: 100%;
     padding: 14px;
     overflow-y: auto;
-    scrollbar-width: none;
 }
 
 /* Children must keep their natural height: flex-shrink would squash the
@@ -5356,7 +5397,6 @@ pre.tool-cmd {
     display: flex;
     flex-direction: column;
     gap: 9px;
-    scrollbar-width: none;
 }
 
 /* Same as .cred-page > *: without this, flex-shrink squashes cards to the
@@ -6089,8 +6129,6 @@ pre.tool-cmd {
     padding: 10px;
     /* A tight card caps the height inline; scroll rather than squash. */
     overflow-y: auto;
-    /* Same as the rest of the app: no native scrollbar gutter. */
-    scrollbar-width: none;
     background: var(--xratu-input);
     border: 1px solid var(--vscode-widget-border);
     border-radius: var(--xratu-radius-sm);
@@ -6800,8 +6838,6 @@ button.mcp-row-main:hover strong {
     padding: 4px;
     max-height: 190px;
     overflow-y: auto;
-    /* Same as the rest of the app: no native scrollbar gutter. */
-    scrollbar-width: none;
     background: var(--xratu-input);
     border: 1px solid var(--vscode-widget-border);
     border-radius: var(--xratu-radius-sm);

@@ -120,16 +120,24 @@ function toolRowDone(r: ToolRow): boolean {
     return !!(r.call.result || (r.result && r.result.kind === 'toolCall'));
 }
 
+/** A run of identical calls collapses into ONE pill ("Read file ×8") - EXCEPT
+ *  terminal commands: each command and its output is its own unit, and
+ *  collapsing them nested a second rail under the group. */
+function isGroupableTool(tool: string | undefined): boolean {
+    return toolFamily(tool) !== 'terminal';
+}
+
 /** Consecutive same-tool calls collapse into ONE pill ("Read file ×8") -
  *  a run that reads ten files in a row should read as one action, not ten
  *  identical rows. Thinking steps and other tools break the run. */
 function pushToolRow(rows: Row[], row: ToolRow): void {
     const last = rows[rows.length - 1];
-    if (last?.kind === 'toolGroup' && last.calls[0].call.tool === row.call.tool) {
+    const groupable = isGroupableTool(row.call.tool);
+    if (groupable && last?.kind === 'toolGroup' && last.calls[0].call.tool === row.call.tool) {
         last.calls.push(row);
         return;
     }
-    if (last?.kind === 'tool' && last.call.tool === row.call.tool) {
+    if (groupable && last?.kind === 'tool' && last.call.tool === row.call.tool) {
         rows[rows.length - 1] = { key: last.key, kind: 'toolGroup', calls: [last, row] };
         return;
     }
@@ -509,24 +517,76 @@ function PillDiffBlock({ block, lang }: { block: PatchBlock; lang: string }) {
 }
 
 /** Edit-family diff view: per-line del/add tint with +/− gutter marks and
- *  IDE-style syntax highlighting, full-bleed on the pill background.
- *  Unparseable patch → a no-wrap raw scroll box (never a wrapped wall of
- *  markers) with a short note. */
+ *  IDE-style syntax highlighting, full-bleed on the message surface.
+ *  Tries SEARCH/REPLACE first, then a unified diff (models sometimes emit
+ *  `---`/`+++`/`@@` instead), and only then the raw no-wrap scroll box. */
 function PatchBlocksView({ patch, lang }: { patch: string; lang: string }) {
-    const blocks = useMemo(() => parsePatchBlocks(patch), [patch]);
-    if (!blocks) {
-        return (
-            <div className="pill-patch-raw">
-                <p className="pill-patch-note">{t('patchUnparsed')}</p>
-                <pre className="pill-patch-pre" dir="ltr">{truncateArg(patch)}</pre>
-            </div>
-        );
+    const parsed = useMemo(() => {
+        const blocks = parsePatchBlocks(patch);
+        if (blocks) return { kind: 'blocks' as const, blocks };
+        const unified = parseUnifiedDiff(patch);
+        if (unified) return { kind: 'unified' as const, unified };
+        return { kind: 'raw' as const };
+    }, [patch]);
+
+    if (parsed.kind === 'raw') {
+        return <pre className="pill-patch-pre" dir="ltr">{truncateArg(patch)}</pre>;
+    }
+    if (parsed.kind === 'unified') {
+        return <UnifiedDiffView lines={parsed.unified} />;
     }
     return (
         <div className="pill-diff" dir="ltr">
-            {blocks.map((b, i) => (
+            {parsed.blocks.map((b, i) => (
                 <PillDiffBlock key={i} block={b} lang={lang} />
             ))}
+        </div>
+    );
+}
+
+type UnifiedLine = { kind: 'same' | 'del' | 'add'; text: string };
+
+/** Unified-diff fallback (`---` / `+++` / `@@` hunks with `-`/`+`/` ` lines).
+ *  Returns null unless there is at least one real +/- change, so plain prose
+ *  still reaches the raw view. */
+function parseUnifiedDiff(text: string): UnifiedLine[] | null {
+    const lines = stripReplayMarkers(text)
+        .replace(/^\uFEFF/, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/… \[\+\d+ chars truncated\][\s\S]*$/, '')
+        .split('\n');
+    const out: UnifiedLine[] = [];
+    let inHunk = false;
+    for (const raw of lines) {
+        const line = raw.replace(/\r$/, '');
+        if (/^@@/.test(line)) {
+            inHunk = true;
+            continue;
+        }
+        if (/^(---|\+\+\+)\s/.test(line)) continue;
+        if (!inHunk) continue;
+        if (line.startsWith('\\')) continue; // "\ No newline at end of file"
+        if (line.startsWith('+')) out.push({ kind: 'add', text: line.slice(1) });
+        else if (line.startsWith('-')) out.push({ kind: 'del', text: line.slice(1) });
+        else if (line.startsWith(' ') || line === '') out.push({ kind: 'same', text: line.slice(1) });
+        else out.push({ kind: 'same', text: line });
+    }
+    return out.some((l) => l.kind === 'add' || l.kind === 'del') ? out : null;
+}
+
+function UnifiedDiffView({ lines }: { lines: UnifiedLine[] }) {
+    return (
+        <div className="pill-diff" dir="ltr">
+            {/* .pill-diff spaces its children (separate SEARCH/REPLACE blocks);
+                the lines must sit inside ONE block or every line gains that gap. */}
+            <div className="pill-diff-block">
+                {lines.map((l, i) => (
+                    <div key={i} className={`pill-diff-line${l.kind === 'same' ? '' : ` ${l.kind}`}`}>
+                        <span className="pill-diff-mark">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '}</span>
+                        <span className="pill-diff-code">{l.text}</span>
+                    </div>
+                ))}
+            </div>
         </div>
     );
 }
@@ -536,21 +596,32 @@ interface EditStats {
     del: number;
 }
 
-/** +added / −removed counts for one patch, from the same LCS diff the pill
- *  renders. Oversized blocks return null from diffBlockLines and are skipped. */
-function editStatsOf(patch: string): EditStats {
+/** +added / −removed counts for one patch, from the same diff the pill
+ *  renders (SEARCH/REPLACE blocks, else a unified diff). `null` when neither
+ *  parses, so the caller omits the stats rather than printing "+0 −0".
+ *  Oversized blocks return null from diffBlockLines and are skipped. */
+function editStatsOf(patch: string): EditStats | null {
     const blocks = parsePatchBlocks(patch);
-    const stats: EditStats = { add: 0, del: 0 };
-    if (!blocks) return stats;
-    for (const b of blocks) {
-        const lines = diffBlockLines(b.search, b.replace);
-        if (!lines) continue;
-        for (const l of lines) {
-            if (l.kind === 'add') stats.add++;
-            else if (l.kind === 'del') stats.del++;
+    if (blocks) {
+        const stats: EditStats = { add: 0, del: 0 };
+        for (const b of blocks) {
+            const lines = diffBlockLines(b.search, b.replace);
+            if (!lines) continue;
+            for (const l of lines) {
+                if (l.kind === 'add') stats.add++;
+                else if (l.kind === 'del') stats.del++;
+            }
         }
+        return stats;
     }
-    return stats;
+    const unified = parseUnifiedDiff(patch);
+    if (unified) {
+        return {
+            add: unified.filter((l) => l.kind === 'add').length,
+            del: unified.filter((l) => l.kind === 'del').length,
+        };
+    }
+    return null;
 }
 
 /** Sum of every patch a run of edit calls wrote. */
@@ -561,6 +632,7 @@ function sumEditStats(calls: ToolRow[]): EditStats {
         const patch = argString(args, 'patch') ?? (c.call.text.includes('<<<<<<<') ? c.call.text : undefined);
         if (!patch) continue;
         const s = editStatsOf(patch);
+        if (!s) continue;
         total.add += s.add;
         total.del += s.del;
     }
@@ -577,14 +649,17 @@ function EditStatsText({ stats }: { stats: EditStats }) {
 }
 
 /** Per-file header inside an open edit body: path + change counts. The
- *  open-in-editor affordance lives once on the pill summary, not per file. */
-function EditFileHead({ path, stats }: { path?: string; stats: EditStats }) {
+ *  open-in-editor affordance lives once on the pill summary, not per file.
+ *  Stats are omitted when the patch could not be parsed (no misleading +0 −0). */
+function EditFileHead({ path, stats }: { path?: string; stats: EditStats | null }) {
     return (
         <div className="edit-file-head" dir="ltr">
             <span className="edit-file-path">{path || 'patch'}</span>
-            <span className="edit-file-stat">
-                <span className="a">+{stats.add}</span> <span className="d">−{stats.del}</span>
-            </span>
+            {stats && (
+                <span className="edit-file-stat">
+                    <span className="a">+{stats.add}</span> <span className="d">−{stats.del}</span>
+                </span>
+            )}
         </div>
     );
 }
@@ -596,7 +671,7 @@ function EditFileSection({ call, result }: { call: Step; result?: Step }) {
     const patch = argString(args, 'patch');
     const rawPatch = !patch && call.text.includes('<<<<<<<') ? call.text : undefined;
     const effective = patch ?? rawPatch;
-    const stats = useMemo(() => (effective ? editStatsOf(effective) : { add: 0, del: 0 }), [effective]);
+    const stats = useMemo(() => (effective ? editStatsOf(effective) : null), [effective]);
     const done = !!call.result || !!result;
     const failed = toolRowFailed(call, result);
     return (
@@ -669,9 +744,10 @@ function ScalarHints({ args, skip }: { args: Record<string, unknown> | null; ski
 /** Labeled key/value args - the generic body (fallback, git, ops, mcp). */
 function ArgView({ call }: { call: Step }) {
     const args = useMemo(() => parseArgs(call.text), [call.text]);
-    if (!args) return <pre dir="ltr">{call.text || t('noArgs')}</pre>;
-    if (Object.keys(args).length === 0)
-        return <pre dir="ltr">{t('noArgs')}</pre>;
+    // No args: render nothing - the pill already names the tool, and
+    // "(no arguments)" is noise under it.
+    if (!args) return call.text ? <pre dir="ltr">{call.text}</pre> : null;
+    if (Object.keys(args).length === 0) return null;
     return (
         <div className="arg-view" dir="ltr">
             {Object.entries(args).map(([k, v]) => {
@@ -714,7 +790,7 @@ function EditBody({ call, result }: { call: Step; result?: Step }) {
                 <>
                     {effectivePatch !== undefined ? (
                         <>
-                            <EditFileHead path={path} stats={stats ?? { add: 0, del: 0 }} />
+                            <EditFileHead path={path} stats={stats} />
                             <PatchBlocksView patch={effectivePatch} lang={extToLang(path ?? '')} />
                         </>
                     ) : content !== undefined ? (
@@ -1022,6 +1098,12 @@ function ActivityRow({ row, running, isLast }: { row: Exclude<Row, { kind: 'tool
         if (!toolRowDone({ key: '', call: summaryCall, result: summaryResult })) return null;
         return parseTerminalOutput(resultTextOf(summaryCall, summaryResult))?.exitCode ?? null;
     }, [summaryCall, summaryResult, family]);
+    // Terminal pills show the command in the summary - "Run terminal command"
+    // alone says nothing about what ran.
+    const summaryCmd = useMemo(() => {
+        if (!summaryCall || family !== 'terminal') return null;
+        return argString(parseArgs(summaryCall.text), 'command') ?? null;
+    }, [summaryCall, family]);
 
     if (row.kind === 'thinking') {
         const dur = fmtDur((row.step.endedAt ?? 0) - (row.step.startedAt ?? 0));
@@ -1071,9 +1153,10 @@ function ActivityRow({ row, running, isLast }: { row: Exclude<Row, { kind: 'tool
         >
             <summary>
                 <Icon size={13} className="step-icon" />
-                <span className="step-label" dir={fa === row.call.tool ? 'ltr' : undefined}>
+                <span className={`step-label${summaryCmd ? ' step-label-fixed' : ''}`} dir={fa === row.call.tool ? 'ltr' : undefined}>
                     {fa}
                 </span>
+                {summaryCmd && <span className="step-cmd" dir="ltr">{summaryCmd}</span>}
                 {done ? (
                     failed ? (
                         <X size={13} className="step-status err" />
