@@ -17,11 +17,76 @@
  * `userIndex` to a row in both by counting user rows from index 0.
  */
 
-/** Per-message content ceiling kept in memory (chars). */
+/**
+ * Per-message content FLOOR kept in memory (chars).
+ *
+ * This is the old fixed cap and is retained as the floor so a small or unknown
+ * window behaves exactly as before. It is NOT the ceiling any more - see
+ * `contentCapForWindow`.
+ */
 export const IN_MEMORY_CONTENT_CAP = 40_000;
-/** Oldest complete turns dropped from the model ledger past this many. */
+
+/**
+ * Absolute per-message ceiling (chars), whatever the window.
+ *
+ * Matches the terminal-output cap upstream tools already apply (200k chars for
+ * terminal output, 120k for expansion), so the ledger never clips tighter than
+ * the tool that produced the content. ~50k tokens at 4 chars/token (the
+ * occupancy ESTIMATE prices it at 3 chars/token, deliberately higher).
+ */
+export const MAX_CONTENT_CAP = 200_000;
+
+/** Rough chars-per-token used to translate a window into a char budget. */
+const CHARS_PER_TOKEN = 4;
+/** A single message may occupy at most this share of the context window. */
+const PER_MESSAGE_WINDOW_SHARE = 0.08;
+
+/**
+ * Content cap for ONE message, scaled to the context window.
+ *
+ * Regression: this was the fixed `IN_MEMORY_CONTENT_CAP` (40_000 chars, ~13k
+ * tokens) for every window. A fixed absolute cannot serve both ends of a 100x
+ * range - it is far too small for a 1M-token window (it silently discarded
+ * ~80% of a legitimate 200k-char tool result at 11% window fill, head+tail
+ * clipping away the middle) and far too large for an 8k window.
+ *
+ * The cap is a MEMORY bound, so it must scale with what the run can actually
+ * afford. Properties, in order of importance:
+ *   - never TIGHTER than the old fixed cap (no regression on any window)
+ *   - grows with the window (a 1M window keeps ~200k-char messages intact)
+ *   - hard-bounded by MAX_CONTENT_CAP so memory stays finite
+ *   - unknown/absurd windows fall back to the old fixed cap
+ */
+export function contentCapForWindow(windowTokens?: number | null): number {
+    if (typeof windowTokens !== 'number' || !Number.isFinite(windowTokens) || windowTokens < 4096) {
+        return IN_MEMORY_CONTENT_CAP;
+    }
+    const byWindow = Math.floor(windowTokens * PER_MESSAGE_WINDOW_SHARE * CHARS_PER_TOKEN);
+    return Math.max(IN_MEMORY_CONTENT_CAP, Math.min(byWindow, MAX_CONTENT_CAP));
+}
+
+/**
+ * Oldest complete turns dropped from the model ledger past this many.
+ *
+ * This is a MEMORY bound, not a context bound - the context window is policed
+ * separately by compaction (90% of the window) and `boundHistory` (72%), both
+ * of which scale with the window. Dropping turns here is irreversible (unlike
+ * compaction, which summarizes first), so it is set well above any realistic
+ * single session.
+ */
 export const MAX_IN_MEMORY_TURNS = 200;
-/** User turns retained in the persisted snapshot (turn-aligned). */
+/**
+ * User turns retained in the persisted snapshot (turn-aligned).
+ *
+ * DELIBERATELY tighter than `MAX_IN_MEMORY_TURNS` (asserted by
+ * test-history-bounds.mjs) so the snapshot written on every turn stays small.
+ * The consequence is worth stating: reloading the window or restarting the
+ * extension host rebuilds the model ledger from this snapshot, so turns past
+ * the 60th are gone and the context meter drops. That is a reload-time loss by
+ * design, NOT the cause of drops mid-conversation - those can only come from
+ * compaction (90% of the window) or `boundHistory` (72%), neither of which can
+ * fire below that fill.
+ */
 export const MAX_STORED_TURNS = 60;
 
 /**
