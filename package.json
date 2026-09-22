@@ -206,6 +206,7 @@
 		"test:patch-parser": "node test/test-patch-parser.mjs",
 		"test:reasoning-replay": "node test/test-reasoning-replay.mjs",
 		"test:prompt-cache-shape": "node test/test-prompt-cache-shape.mjs",
+		"test:prompt-cache-rate": "node test/test-prompt-cache-rate.mjs",
 		"test:compaction-policy": "node test/test-compaction-policy.mjs",
 		"package": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && node esbuild.js --production && vite build --mode production",
 		"package-vsix": "npx vsce package --no-dependencies",

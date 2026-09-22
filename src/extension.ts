@@ -15,7 +15,7 @@ import { McpConfigStore, type ExternalServerConfig, type McpSaveTarget } from '.
 import { runLocalAgent, type LocalAgentEvent, type LocalImageAttachment, type LocalUsage } from './local/localAgent';
 import type { LocalToolExecutor } from './local/localAgent';
 import { extractPdfAttachments } from './pdfExtract';
-import { LocalSessionStore, resolveSessionTitle } from './local/localSessionStore';
+import { LocalSessionStore, resolveSessionTitle, type LocalSessionHistoryMessage } from './local/localSessionStore';
 import {
     UsageLedgerStore,
     aggregateByDayAndModel,
@@ -44,7 +44,8 @@ import {
 import { knownContextWindow, knownMaxOutputTokens } from './modelKnowledge';
 import { ui, setUiLocale } from './uiStrings';
 import { LOCAL_SYSTEM_PROMPT } from './systemPrompt';
-import { IN_MEMORY_CONTENT_CAP, MAX_IN_MEMORY_TURNS, clipHistoryContent, clipToolCallArguments, contentCapForWindow, countUserRows, evictOldestTurns } from './local/historyBounds';
+import { IN_MEMORY_CONTENT_CAP, MAX_IN_MEMORY_TURNS, boundCarriers, clipHistoryContent, clipToolCallArguments, contentCapForWindow, countUserRows, evictOldestTurns, serializedWithinCap } from './local/historyBounds';
+import { buildReplayHistory, historyRowFromEvent, persistedEventFromAgentEvent } from './local/historyRows';
 import { gitWorkspaceFiles, setPlanModeExitListener, setTaskListWriteListener } from './xratu_mcp_tools';
 import { TASK_LIST_TOOL_NAME, parseTaskListArgs, type TaskListItem } from './taskList';
 import { resolveEditMode } from './tooling/editFileArgs';
@@ -654,7 +655,14 @@ function sameMcpPath(a: string, b: string): boolean {
         : a === b;
 }
 
-function trimDisplayEvent(event: any): any {    if (event?.type === 'tool_call' && event.tool !== TASK_LIST_TOOL_NAME) {
+function trimDisplayEvent(event: any): any {
+    // Provider-native replay carriers are MODEL-ledger data: they must never
+    // reach the display ledger, the pending-turn snapshot, or the webview.
+    if (event?.type === 'assistant_message' && (event.providerBlocks || event.reasoningContent)) {
+        const { providerBlocks: _providerBlocks, reasoningContent: _reasoningContent, ...rest } = event;
+        event = rest;
+    }
+    if (event?.type === 'tool_call' && event.tool !== TASK_LIST_TOOL_NAME) {
         if (event.args && typeof event.args === 'object') {
             return {
                 ...event,
@@ -751,8 +759,12 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
         resolve: (decisions: Record<string, boolean>) => void;
         reject: (err: unknown) => void;
     }> = {};
-    /** Local-mode conversation history (OpenAI-format messages). */
-    private _localHistory: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string }> = [];
+    /** Local-mode conversation history (OpenAI-format messages). Carries the
+     *  provider-native replay carriers (`providerBlocks`, `reasoningContent`,
+     *  `isError`) so the next request rebuilds the EXACT bytes the provider
+     *  saw - a lossy reconstruction breaks prefix prompt caching and drops
+     *  thinking state. */
+    private _localHistory: LocalSessionHistoryMessage[] = [];
     /** User turns evicted from the FRONT of `_localHistory` to bound memory.
      *  The display ledger (`_history`) keeps every turn, so a displayed
      *  userIndex maps to a model-ledger row by subtracting this offset. */
@@ -2365,21 +2377,7 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
      *  `function.arguments`. The normalizer also repairs turns persisted by
      *  older builds that stored the `argumentsJson` key or dropped content. */
     private _buildLocalHistory(): Array<import('./local/localAgent').LocalAgentMessage> {
-        return this._localHistory.map((msg) => ({
-            role: msg.role as 'system' | 'user' | 'assistant' | 'tool',
-            content: msg.content ?? '',
-            tool_calls: msg.tool_calls?.map((tc) => ({
-                id: tc.id,
-                type: 'function',
-                function: {
-                    name: tc.function?.name,
-                    arguments: typeof tc.function?.arguments === 'string'
-                        ? tc.function.arguments
-                        : JSON.stringify(tc.function?.arguments ?? tc.function?.argumentsJson ?? {}),
-                },
-            })),
-            tool_call_id: msg.tool_call_id,
-        }));
+        return buildReplayHistory(this._localHistory);
     }
 
     /** Append to the model ledger with the in-memory content cap applied.
@@ -2387,19 +2385,31 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
      *  (terminal output is capped at 200k chars, expansion at 120k) or a huge
      *  tool-call argument (an edit patch) cannot sit in memory at full size for
      *  the life of the session. */
-    private _pushLocalHistory(row: { role: string; content?: string; tool_calls?: any[]; tool_call_id?: string }): void {
+    private _pushLocalHistory(row: LocalSessionHistoryMessage): void {
         // Scale the per-message cap to the run's window: the fixed 40k-char cap
         // (~13k tokens) silently discarded ~80% of a legitimate 200k-char tool
         // result even at 11% window fill on a 1M window, which the user sees as
         // context loss. Never tighter than before, generous when there is room.
+        //
+        // `providerBlocks`/`reasoningContent` are deliberately NOT clipped: the
+        // bytes must match what the provider cached, and an Anthropic thinking
+        // signature that is truncated is rejected outright. A pathologically
+        // large (or aggregate-over-budget) carrier is DROPPED instead, via
+        // `serializedWithinCap` here and `boundCarriers` in `_trimLocalHistory`,
+        // so the in-memory ledger and the on-disk snapshot agree.
         const cap = contentCapForWindow(this._contextWindowHint());
+        const { providerBlocks, reasoningContent, ...rest } = row;
         this._localHistory.push({
-            ...row,
+            ...rest,
             ...(typeof row.content === 'string' && row.content.length > cap
                 ? { content: clipHistoryContent(row.content, cap) }
                 : {}),
             ...(Array.isArray(row.tool_calls) && row.tool_calls.length
                 ? { tool_calls: row.tool_calls.map((tc) => this._clipToolCall(tc, cap)) }
+                : {}),
+            ...(providerBlocks && serializedWithinCap(providerBlocks) ? { providerBlocks } : {}),
+            ...(typeof reasoningContent === 'string' && serializedWithinCap(reasoningContent)
+                ? { reasoningContent }
                 : {}),
         });
     }
@@ -2412,15 +2422,18 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
         return { ...tc, function: { ...tc.function, arguments: clipToolCallArguments(args, cap) } };
     }
 
-    /** Drop the oldest complete turns from the model ledger past the cap.
+    /** Drop the oldest complete turns from the model ledger past the cap, and
+     *  enforce the aggregate provider-carrier budget (a turn-count cap does not
+     *  bound carriers - one turn can run unbounded rounds). Carriers are dropped
+     *  from the OLDEST rows, keeping the newest reasoning whole.
+     *
      *  Only `_localHistory` is evicted - the display ledger stays complete, and
      *  the offset is tracked so a displayed userIndex still resolves to the
      *  right row (see `_findLocalUserEntry`). */
     private _trimLocalHistory(): void {
         const { rows, evicted } = evictOldestTurns(this._localHistory, MAX_IN_MEMORY_TURNS);
-        if (!evicted) return;
-        this._localHistory = rows;
-        this._localEvictedUserTurns += evicted;
+        this._localHistory = boundCarriers(rows);
+        if (evicted) this._localEvictedUserTurns += evicted;
     }
 
     // ---------------------------------------------------------------------------
@@ -2903,19 +2916,11 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
                     callId: event.id,
                 });
                 break;
-            case 'toolResult':
+            case 'toolResult': {
                 this._flushLiveSegment();
                 this._localThinkingBlockEvent = null;
-                outcome.events.push({
-                    type: 'tool_result',
-                    id: event.id,
-                    tool: event.tool,
-                    // Bound the retained copy: a single terminal/expansion
-                    // result can be 100k+ chars and this array is held for the
-                    // whole turn. The live postMessage below stays full so the
-                    // webview render is unchanged.
-                    output: clipHistoryContent(event.output),
-                });
+                const persisted = persistedEventFromAgentEvent(event);
+                if (persisted) outcome.events.push(persisted);
                 this._scheduleLocalPartialPersist();
                 this._view?.webview.postMessage({
                     type: 'toolResult',
@@ -2924,6 +2929,7 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
                     callId: event.id,
                 });
                 break;
+            }
             case 'toolOutput':
                 // Live output while a long tool runs - display only, never
                 // persisted (the final tool_result carries the capped output).
@@ -2951,24 +2957,12 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
                     } : {}),
                 });
                 break;
-            case 'assistantMessage':
-                outcome.events.push({
-                    type: 'assistant_message',
-                    content: clipHistoryContent(event.text),
-                    tool_calls: event.toolCalls.map((call) => ({
-                        id: call.id,
-                        type: 'function',
-                        // OpenAI wire shape: `arguments` (string). Storing any
-                        // other key here corrupts the REPLAYED history - strict
-                        // local servers (LM Studio) 400 with "Invalid 'content'"
-                        // / missing-arguments errors on the NEXT request.
-                        // Bounded as valid JSON: a large edit patch must not
-                        // sit in the per-turn array at full size.
-                        function: { name: call.name, arguments: clipToolCallArguments(call.argumentsJson) },
-                    })),
-                });
+            case 'assistantMessage': {
+                const persisted = persistedEventFromAgentEvent(event);
+                if (persisted) outcome.events.push(persisted);
                 this._scheduleLocalPartialPersist();
                 break;
+            }
             case 'usage':
                 // Mid-stream ESTIMATES only feed the webview's live context
                 // meter; the turn's recorded usage stays on the real
@@ -4403,17 +4397,8 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
             }
             this._pushLocalHistory({ role: 'user', content: pt.prompt });
             for (const event of pt.events ?? []) {
-                if (event.type === 'assistant_message') {
-                    this._pushLocalHistory({
-                        role: 'assistant',
-                        content: event.content || '',
-                        ...(event.tool_calls?.length ? { tool_calls: event.tool_calls } : {}),
-                    });
-                } else if (event.type === 'tool_result') {
-                    this._pushLocalHistory({ role: 'tool', tool_call_id: event.id, content: event.output });
-                } else if (event.type === 'steer_user') {
-                    this._pushLocalHistory({ role: 'user', content: event.text });
-                }
+                const row = historyRowFromEvent(event);
+                if (row) this._pushLocalHistory(row);
             }
             const answered = new Set(
                 this._localHistory.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)
@@ -5045,17 +5030,8 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
                         this._pushLocalHistory({ role: 'user', content: prompt });
                     }
                     for (const event of outcome.events) {
-                        if (event.type === 'assistant_message') {
-                            this._pushLocalHistory({
-                                role: 'assistant',
-                                content: event.content || '',
-                                ...(event.tool_calls?.length ? { tool_calls: event.tool_calls } : {}),
-                            });
-                        } else if (event.type === 'tool_result') {
-                            this._pushLocalHistory({ role: 'tool', tool_call_id: event.id, content: event.output });
-                        } else if (event.type === 'steer_user') {
-                            this._pushLocalHistory({ role: 'user', content: event.text });
-                        }
+                        const row = historyRowFromEvent(event);
+                        if (row) this._pushLocalHistory(row);
                     }
                     outcome.events.push({ type: 'result', ...outcome.resultEvent });
 
@@ -5209,16 +5185,9 @@ class XratuChatViewProvider implements vscode.WebviewViewProvider {
             this._pushLocalHistory({ role: 'user', content: prompt });
         }
         for (const event of outcome.events) {
-            if (event.type === 'assistant_message') {
-                this._pushLocalHistory({
-                    role: 'assistant',
-                    content: event.content || '',
-                    ...(event.tool_calls?.length ? { tool_calls: event.tool_calls } : {}),
-                });
-            } else if (event.type === 'tool_result') {
-                this._pushLocalHistory({ role: 'tool', tool_call_id: event.id, content: event.output });
-            } else if (event.type === 'steer_user') {
-                this._pushLocalHistory({ role: 'user', content: event.text });
+            const row = historyRowFromEvent(event);
+            if (row) this._pushLocalHistory(row);
+            if (event.type === 'steer_user') {
                 this._history.push({
                     role: 'user',
                     content: event.text,
