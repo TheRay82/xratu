@@ -109,28 +109,30 @@ export function reduceChat(state: ChatState, msg: FromExtensionMessage): ChatSta
             // Steering a live run: the in-flight assistant bubble CLOSES at
             // the steer point (streamingId cleared, so the next chunk opens
             // a fresh bubble AFTER the steer) and the steer renders as a
-            // normal user bubble - the timeline reads in true order. A fresh
-            // streaming bubble opens IMMEDIATELY: while the run finishes the
-            // current round (tool execution can take a while) the user sees
-            // the typing indicator, not a dead timeline.
+            // normal user bubble - the timeline reads in true order. While the
+            // run is still LIVE, a fresh streaming bubble opens immediately so
+            // the user sees the typing indicator while the current round
+            // finishes. After a cancel/error (busy false) the steer is only
+            // ledgered as a user row - opening a bubble then would orphan a
+            // perpetual typing indicator that nothing ever finalizes.
             const closed = state.streamingId
                 ? patch(state, state.streamingId, { status: 'done' })
                 : state;
-            const { state: s } = ensureStreaming(
-                append(
-                    { ...closed, streamingId: null },
-                    {
-                        id: nextId(),
-                        role: 'user',
-                        text: msg.value,
-                        steps: [],
-                        status: 'done',
-                        createdAt: Date.now(),
-                        attachments: msg.attachments,
-                        steered: true,
-                    }
-                )
+            const withUser = append(
+                { ...closed, streamingId: null },
+                {
+                    id: nextId(),
+                    role: 'user',
+                    text: msg.value,
+                    steps: [],
+                    status: 'done',
+                    createdAt: Date.now(),
+                    attachments: msg.attachments,
+                    steered: true,
+                }
             );
+            if (!state.busy) return withUser;
+            const { state: s } = ensureStreaming(withUser);
             return s;
         }
 
@@ -370,15 +372,24 @@ export function reduceChat(state: ChatState, msg: FromExtensionMessage): ChatSta
             // When the host's per-segment renders line up with the streamed
             // text steps, each step carries its FINAL formatted content
             // between the pills - nothing is collapsed back into one bottom
-            // block. On a mismatch (e.g. an approval resume continued a text
-            // run) fall back to the single rendered block and drop the raw
-            // segments so nothing renders twice.
+            // block. Alignment is by the TAIL: a steer closes the in-flight
+            // bubble and opens a fresh one, so the CURRENT bubble owns the
+            // turn's TRAILING segments. Mapping from the front (or falling
+            // back to the single rendered block) would dump the whole answer -
+            // pre-steer prose included - into the final bubble, bumping every
+            // earlier AI text response to the end. Any leading text steps the
+            // segments no longer cover keep their live streamed html.
             let steps: Step[] | undefined;
             let renderedHtml = msg.renderedHtml;
-            if (streaming && segs && segs.length > 0 && segs.length === textSteps.length) {
-                let i = 0;
+            if (streaming && segs && segs.length > 0 && textSteps.length > 0) {
+                const tailSteps = textSteps.slice(Math.max(0, textSteps.length - segs.length));
+                const tailSegs = segs.slice(Math.max(0, segs.length - textSteps.length));
+                const htmlByStep = new Map<string, string>();
+                for (let i = 0; i < tailSteps.length; i++) htmlByStep.set(tailSteps[i].id, tailSegs[i]);
                 steps = streaming.steps.map((st) =>
-                    st.kind === 'text' ? { ...st, html: segs[i++] } : st
+                    st.kind === 'text' && htmlByStep.has(st.id)
+                        ? { ...st, html: htmlByStep.get(st.id) }
+                        : st
                 );
                 renderedHtml = undefined;
             } else if (streaming && textSteps.length > 0) {
