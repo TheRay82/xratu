@@ -8,6 +8,7 @@ import {
     terminalToolDescription,
     terminalCommandParamDescription,
     terminalFailureHint,
+    appendHintToResult,
 } from './tooling/shellPlatform';
 import { ShadowCheckpointStore } from './shadowGit';
 import { ExternalMcpManager, EXTERNAL_PREFIX } from './externalMcp';
@@ -543,8 +544,10 @@ async function dispatchTool(
                 const hint = !killReason && !err && code !== 0
                     ? terminalFailureHint(process.platform, stderr)
                     : null;
-                if (hint) result += `\nHint: ${hint}`;
-                resolve({ content: [{ type: 'text', text: result.slice(0, 200000) }], isError: !!killReason || !!err || code !== 0 });
+                resolve({
+                    content: [{ type: 'text', text: appendHintToResult(result, hint) }],
+                    isError: !!killReason || !!err || code !== 0,
+                });
             };
             resetIdle();
             child.stdout.on('data', (d: Buffer) => {

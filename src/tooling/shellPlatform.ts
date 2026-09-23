@@ -27,10 +27,16 @@
 
 /** What to do instead of a binary this shell does not have. */
 interface ShellAdvice {
-    /** Shell command that replaces it, when one exists. */
-    equivalent?: string;
+    /**
+     * Individually runnable replacements. A LIST, never one string with "or"
+     * or "/" inside it: a hint reads as a command to submit, and
+     * `del <file> / rmdir /s /q <dir>` only produced another invalid command.
+     */
+    equivalent?: string[];
     /** Built-in tool that replaces the whole shell detour. */
     tool?: string;
+    /** Prose, for replacements that are not a command at all. */
+    note?: string;
 }
 
 /**
@@ -41,30 +47,33 @@ interface ShellAdvice {
  * argument error separately.
  */
 const WINDOWS_MISSING: Record<string, ShellAdvice> = {
-    ls: { equivalent: 'dir' },
-    cat: { equivalent: 'type <file>', tool: 'read_file' },
-    grep: { equivalent: 'findstr /s /n /i "pattern" .', tool: 'grep_search' },
-    egrep: { equivalent: 'findstr /s /n /i "pattern" .', tool: 'grep_search' },
-    fgrep: { equivalent: 'findstr /s /n /i "pattern" .', tool: 'grep_search' },
+    ls: { equivalent: ['dir'] },
+    cat: { equivalent: ['type <file>'], tool: 'read_file' },
+    grep: { equivalent: ['findstr /s /n /i "pattern" .'], tool: 'grep_search' },
+    egrep: { equivalent: ['findstr /s /n /i "pattern" .'], tool: 'grep_search' },
+    fgrep: { equivalent: ['findstr /s /n /i "pattern" .'], tool: 'grep_search' },
     rg: { tool: 'grep_search' },
-    find: { equivalent: 'dir /s /b', tool: 'glob_search' },
-    head: { tool: 'read_file (start_line + max_lines)' },
-    tail: { tool: 'read_file (start_line + max_lines)' },
-    sed: { equivalent: 'node -e "..." or python -c "..."' },
-    awk: { equivalent: 'node -e "..." or python -c "..."' },
-    wc: { equivalent: 'find /c /v "" <file>', tool: 'read_file' },
-    rm: { equivalent: 'del <file> / rmdir /s /q <dir>' },
-    cp: { equivalent: 'copy / xcopy /e /i' },
-    mv: { equivalent: 'move' },
-    touch: { equivalent: 'type nul > <file>' },
-    which: { equivalent: 'where' },
-    pwd: { equivalent: 'cd' },
-    python3: { equivalent: 'python' },
-    pip3: { equivalent: 'pip' },
-    diff: { equivalent: 'fc /n <file1> <file2> or git diff' },
-    sleep: { equivalent: 'timeout /t <seconds> /nobreak' },
-    clear: { equivalent: 'cls' },
-    source: { equivalent: 'Scripts\\activate (a venv activates by running its script)' },
+    // `find.exe` is normally PRESENT (the misuse branch in terminalFailureHint
+    // handles it); this entry is the safety net for a machine where it is not
+    // on PATH, which is the only way it reaches the missing-binary path.
+    find: { equivalent: ['dir /s /b'], tool: 'glob_search' },
+    head: { tool: 'read_file' },
+    tail: { tool: 'read_file' },
+    sed: { equivalent: ['node -e "<script>"', 'python -c "<script>"'] },
+    awk: { equivalent: ['node -e "<script>"', 'python -c "<script>"'] },
+    wc: { equivalent: ['find /c /v "" <file>'], tool: 'read_file' },
+    rm: { equivalent: ['del <file>', 'rmdir /s /q <dir>'] },
+    cp: { equivalent: ['copy <src> <dst>', 'xcopy /e /i <src> <dst>'] },
+    mv: { equivalent: ['move <src> <dst>'] },
+    touch: { equivalent: ['type nul > <file>'] },
+    which: { equivalent: ['where <name>'] },
+    pwd: { equivalent: ['cd'] },
+    python3: { equivalent: ['python'] },
+    pip3: { equivalent: ['pip'] },
+    diff: { equivalent: ['fc /n <file1> <file2>', 'git diff -- <path>'] },
+    sleep: { equivalent: ['timeout /t <seconds> /nobreak'] },
+    clear: { equivalent: ['cls'] },
+    source: { note: 'A virtualenv activates on Windows by running its own script, e.g. `.venv\\Scripts\\activate`.' },
     chmod: {},
     chown: {},
     sudo: {},
@@ -81,30 +90,27 @@ const WINDOWS_MISSING: Record<string, ShellAdvice> = {
     zsh: {},
     jq: {},
     nano: {},
-    vim: { equivalent: 'edit the file with the edit_file / apply_patch tools' },
+    vim: { note: 'Edit the file with the edit_file / apply_patch tools rather than a terminal editor.' },
 };
 
 /** cmd.exe / PowerShell commands missing from bash. */
 const POSIX_MISSING: Record<string, ShellAdvice> = {
-    dir: { equivalent: 'ls' },
-    findstr: { equivalent: 'grep -rn' },
-    where: { equivalent: 'which' },
-    del: { equivalent: 'rm' },
-    copy: { equivalent: 'cp' },
-    move: { equivalent: 'mv' },
-    xcopy: { equivalent: 'cp -r' },
-    robocopy: { equivalent: 'cp -r' },
-    tasklist: { equivalent: 'ps aux' },
-    taskkill: { equivalent: 'kill' },
-    cls: { equivalent: 'clear' },
-    set: { equivalent: 'export VAR=value' },
-    type: { equivalent: 'cat' },
-    more: { equivalent: 'less / cat' },
-    fc: { equivalent: 'diff' },
+    dir: { equivalent: ['ls'] },
+    findstr: { equivalent: ['grep -rn'] },
+    where: { equivalent: ['which'] },
+    del: { equivalent: ['rm'] },
+    copy: { equivalent: ['cp'] },
+    move: { equivalent: ['mv'] },
+    xcopy: { equivalent: ['cp -r'] },
+    robocopy: { equivalent: ['cp -r'] },
+    tasklist: { equivalent: ['ps aux'] },
+    taskkill: { equivalent: ['kill'] },
+    cls: { equivalent: ['clear'] },
+    set: { equivalent: ['export VAR=value'] },
+    type: { equivalent: ['cat'] },
+    more: { equivalent: ['less', 'cat'] },
+    fc: { equivalent: ['diff'] },
 };
-
-const WIN = 'Windows cmd.exe, not bash';
-const POSIX = 'bash';
 
 /** Strip a directory or extension so `C:\\tools\\rg.exe` keys as `rg`. */
 function binaryName(raw: string): string {
@@ -113,14 +119,20 @@ function binaryName(raw: string): string {
 }
 
 /** One-line "do this instead" sentence for a missing binary. */
-function adviceSentence(name: string, win: boolean, advice: ShellAdvice | undefined): string {
-    if (advice && advice.equivalent && advice.tool) {
-        return `Use the ${advice.tool} tool instead (\`${advice.equivalent}\` in ${win ? 'cmd.exe' : 'bash'}).`;
+function adviceSentence(win: boolean, advice: ShellAdvice | undefined): string {
+    if (advice?.note) return advice.note;
+    // Each alternative gets its OWN code span: the model copies what is inside
+    // backticks, so alternatives must never share one.
+    const equivalents = advice?.equivalent?.length
+        ? advice.equivalent.map((cmd) => `\`${cmd}\``).join(' or ')
+        : '';
+    if (equivalents && advice?.tool) {
+        return `Use the ${advice.tool} tool instead (${equivalents} in ${win ? 'cmd.exe' : 'bash'}).`;
     }
-    if (advice && advice.equivalent) {
-        return `Use \`${advice.equivalent}\` instead.`;
+    if (equivalents) {
+        return `Use ${equivalents} instead.`;
     }
-    if (advice && advice.tool) {
+    if (advice?.tool) {
         return `Use the ${advice.tool} tool instead.`;
     }
     // Unmapped name (or one with no equivalent): name the whole class of
@@ -174,8 +186,20 @@ export function terminalFailureHint(platform: NodeJS.Platform, stderr: string): 
     // ".exe"/".cmd"/".bat" stripped above; keep the raw spelling in the message
     // so the model recognises the command it actually sent.
     return `'${raw}' is not a ${win ? 'cmd.exe' : 'bash'} command (or is not on PATH). `
-        + `${adviceSentence(name, win, advice)} `
+        + `${adviceSentence(win, advice)} `
         + `Do not retry ${win ? 'POSIX commands' : 'cmd.exe/PowerShell commands'} in this shell.`;
+}
+
+/**
+ * Attach the dialect hint to a finished result, truncating FIRST. Appending
+ * the hint to the untruncated result and slicing afterwards put it past the
+ * cut on any chatty failure, so exactly the runs that needed the correction
+ * most arrived with no hint at all. The hint is a fixed short line, so it does
+ * not need to count against the output budget.
+ */
+export function appendHintToResult(result: string, hint: string | null, limit = 200000): string {
+    const head = result.slice(0, limit);
+    return hint ? `${head}\nHint: ${hint}` : head;
 }
 
 /**
@@ -187,10 +211,15 @@ export function terminalToolDescription(platform: NodeJS.Platform): string {
     const shell = win ? 'Windows cmd.exe - this is NOT bash, PowerShell or WSL' : '/bin/bash';
 
     const dialect = win
-        ? 'POSIX commands do not exist here: ls, cat, grep, find, head, tail, sed, awk, rm, cp, mv, touch and which '
-            + 'all fail with "is not recognized". Write cmd.exe commands (dir, type, findstr, where, del, copy, move) '
-            + 'or, better, use the built-in read_file / grep_search / glob_search / list_files tools, which behave the '
-            + 'same on every platform and need no approval round for shell dialect guessing.'
+        // `find` is deliberately NOT in the missing list: find.exe is a
+        // built-in line filter, so claiming it "is not recognized" would
+        // contradict the misuse branch in terminalFailureHint below.
+        ? 'POSIX commands do not exist here: ls, cat, grep, head, tail, sed, awk, rm, cp, mv, touch and which all '
+            + 'fail with "is not recognized". `find` is different: it EXISTS as a line filter, not a file finder, so '
+            + 'a POSIX-style `find . -name "*.ts"` reports an argument error instead - use glob_search to find files. '
+            + 'Write cmd.exe commands (dir, type, findstr, where, del, copy, move) or, better, use the built-in '
+            + 'read_file / grep_search / glob_search / list_files tools, which behave the same on every platform and '
+            + 'need no approval round for shell dialect guessing.'
         : 'Write bash commands; cmd.exe/PowerShell commands such as dir, findstr, where, del, copy and move do not '
             + 'exist here. For reading and searching files the built-in read_file / grep_search / glob_search / '
             + 'list_files tools are available too.';

@@ -26,6 +26,7 @@ const {
     terminalToolDescription,
     terminalCommandParamDescription,
     terminalFailureHint,
+    appendHintToResult,
 } = require('../out/tooling/shellPlatform.js');
 
 let failed = 0;
@@ -51,6 +52,13 @@ const ok = (name, cond, detail = '') => {
     // explicit "this does not exist here" warning.
     ok('windows description drops the POSIX sample command', !win.includes('wc -l') && !win.includes('cat data.csv'));
     ok('windows description warns off </dev/null', /there is no `<\/dev\/null` here/.test(win));
+
+    // `find.exe` EXISTS on Windows as a line filter. Listing it as "not
+    // recognized" contradicted the find-misuse branch in terminalFailureHint
+    // and taught the model something false about the host shell.
+    ok('windows description drops find from the missing list', !win.includes('grep, find, head'));
+    ok('windows description explains find.exe semantics', win.includes('`find` is different') && win.includes('line filter'));
+    ok('windows description sends file search to glob_search', win.includes('use glob_search to find files'));
     ok('windows description keeps the plan-mode note', win.includes('PLAN MODE'));
     ok('windows description keeps the kill windows', win.includes('30-minute hard cap') && win.includes('10 minutes'));
 
@@ -130,6 +138,44 @@ const ok = (name, cond, detail = '') => {
 
     const dash = terminalFailureHint('darwin', 'sh: 1: findstr: not found');
     ok('dash "not found" form is matched', typeof dash === 'string' && dash.includes('grep -rn'));
+}
+
+// --- advice must be a command the model can actually run -------------------
+
+{
+    const missing = (name) => terminalFailureHint('win32', `'${name}' is not recognized as an internal or external command,`);
+
+    const rm = missing('rm');
+    ok('rm advice splits the file and directory cases', rm.includes('`del <file>`') && rm.includes('`rmdir /s /q <dir>`'));
+    ok('rm advice is not one mashed command', !rm.includes('`del <file> / rmdir'));
+
+    const cp = missing('cp');
+    ok('cp advice splits copy and xcopy', cp.includes('`copy <src> <dst>`') && cp.includes('`xcopy /e /i <src> <dst>`'));
+
+    const sed = missing('sed');
+    ok('sed advice separates node from python', sed.includes('`node -e "<script>"`') && sed.includes('`python -c "<script>"`'));
+    ok('sed advice joins the alternatives with "or"', /`node -e "<script>"` or `python -c "<script>"`/.test(sed));
+
+    const diff = missing('diff');
+    ok('diff advice separates fc from git diff', diff.includes('`fc /n <file1> <file2>`') && diff.includes('`git diff -- <path>`'));
+
+    // Prose advice must NOT be rendered inside a code span: the model copies
+    // whatever is backticked straight into the next command.
+    const vim = missing('vim');
+    ok('vim advice is prose, not a fake command', vim.includes('edit_file') && !vim.includes('`edit the file'));
+
+    const source = missing('source');
+    ok('source advice is prose about the venv script', source.includes('activates on Windows') && !source.includes('`A virtualenv'));
+}
+
+// --- the hint must survive truncation of a chatty failure ------------------
+
+{
+    const big = appendHintToResult('x'.repeat(500_000), 'HINT');
+    ok('a full-size result still ends with the hint', big.endsWith('\nHint: HINT'));
+    ok('truncation still bounds the payload', big.length === 200000 + '\nHint: HINT'.length);
+    check('no hint means plain truncation', appendHintToResult('abcdef', null, 3), 'abc');
+    check('a short result is untouched', appendHintToResult('abc', 'HINT'), 'abc\nHint: HINT');
 }
 
 // --- ordinary failures must NOT be blamed on the shell --------------------
