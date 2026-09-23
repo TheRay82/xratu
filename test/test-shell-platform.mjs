@@ -191,6 +191,15 @@ const ok = (name, cond, detail = '') => {
     check('unmatched stderr gets no hint', terminalFailureHint('win32', 'error TS2304: Cannot find name'), null);
     // "0 tests failed" style noise must not trip the "not found" matcher.
     check('benign "nothing found" text gets no hint', terminalFailureHint('linux', 'grep: no matches found'), null);
+    // A loose `<word>: not found` matcher would read these as a missing binary
+    // and tell the model an installed tool is absent. Only the shell's own
+    // `bash: ... not found` diagnostic may produce a hint.
+    check('gh HTTP 404 gets no hint', terminalFailureHint('linux', 'gh: Not Found (HTTP 404)'), null);
+    check('HTTP status line gets no hint', terminalFailureHint('linux', 'HTTP 404: Not Found'), null);
+    check('lowercase error prefix gets no hint', terminalFailureHint('linux', 'error: not found'), null);
+    // ...while the real bash/dash forms still do.
+    ok('bash "line N" form still yields a hint', terminalFailureHint('linux', 'bash: line 1: nosuchcmd: command not found') !== null);
+    ok('macOS bash 3.2 form still yields a hint', terminalFailureHint('darwin', 'bash: nosuchcmd: command not found') !== null);
 }
 
 console.log(failed === 0 ? '\nshell-platform tests: all passed' : `\nshell-platform tests: ${failed} FAILED`);

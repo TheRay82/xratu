@@ -147,8 +147,15 @@ function adviceSentence(win: boolean, advice: ShellAdvice | undefined): string {
 // cmd.exe:  'grep' is not recognized as an internal or external command,
 // PowerShell cmdlets reported from cmd.exe use the same message.
 const WINDOWS_NOT_FOUND = /'?([^'\r\n]+?)'? is not recognized as an internal or external command/i;
-// bash:  bash: grep: command not found      dash:  sh: 1: grep: not found
-const POSIX_NOT_FOUND = /(?:^|[\s:])([A-Za-z0-9_.+-]+): (?:command )?not found\b/im;
+// bash 5.x:  bash: line 1: grep: command not found
+// bash 3.2 (macOS):  bash: grep: command not found
+// dash:  sh: 1: grep: not found
+// Anchored to the SHELL's own prefix and case-sensitive on purpose: a loose
+// `<word>: not found` matcher fires on ordinary failures like
+// `gh: Not Found (HTTP 404)` or `error: not found`, telling the model that an
+// installed tool is missing. Only the shell diagnosing its own missing
+// binary may produce a dialect hint.
+const POSIX_NOT_FOUND = /^(?:\/bin\/|\/usr\/bin\/)?(?:bash|dash|sh|zsh): (?:(?:line )?\d+: )?([^\s:]+): (?:command )?not found\s*$/m;
 // Windows find.exe exists but is a line filter, so POSIX-style file search
 // arrives as an argument error instead of a missing-command error.
 const WINDOWS_FIND_MISUSE = /\bFIND: Parameter format not correct\b/i;
