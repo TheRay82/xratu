@@ -252,6 +252,6 @@ export function terminalToolDescription(platform: NodeJS.Platform): string {
  */
 export function terminalCommandParamDescription(platform: NodeJS.Platform): string {
     return platform === 'win32'
-        ? 'Shell command for cmd.exe, e.g. "python test.py" or "findstr /s /n /i \\"pattern\\" *.ts" or "dir /b *.json"'
+        ? 'Shell command for cmd.exe, e.g. "python test.py" or "findstr /s /n /i pattern *.ts" or "dir /b *.json"'
         : 'Shell command, e.g. "python test.py" or "cat data.csv | wc -l"';
 }

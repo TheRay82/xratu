@@ -86,6 +86,9 @@ const ok = (name, cond, detail = '') => {
     const win = terminalCommandParamDescription('win32');
     ok('windows param example is a cmd.exe command', win.includes('findstr') || win.includes('dir /b'));
     ok('windows param example has no POSIX pipe example', !win.includes('wc -l'));
+    // cmd.exe does not use backslash escaping, so a `\"` here is a bug: a model
+    // copying the example verbatim would pass a literal backslash to findstr.
+    ok('windows param example has no backslash-escaped quotes', !win.includes('\\"'));
 
     const posix = terminalCommandParamDescription('linux');
     ok('posix param example keeps the cat example', posix.includes('cat data.csv'));
